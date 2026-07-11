@@ -4,9 +4,11 @@ import { readFile } from 'node:fs/promises'
 import type { Readable } from 'node:stream'
 import { StringDecoder } from 'node:string_decoder'
 
+import { collapseAttachedContext } from '../shared/attachment-context'
 import type {
   AgentMessage,
   AssistantMessage,
+  PiCommand,
   PiModel,
   SessionEntry,
   SessionState,
@@ -46,6 +48,11 @@ export interface PiRpcClientOptions {
 
 type JsonlChunk = string | Uint8Array
 
+const MAX_STDERR_CHARACTERS = 256 * 1024
+const MAX_TOOL_OUTPUT_CHARACTERS = 512 * 1024
+const MAX_JSONL_RECORD_CHARACTERS = 64 * 1024 * 1024
+const COMPACTION_TIMEOUT_MS = 10 * 60_000
+
 /** Serialize one strict LF-delimited JSONL record. */
 export function serializeJsonLine(value: unknown): string {
   return `${JSON.stringify(value)}\n`
@@ -62,13 +69,17 @@ export class StrictJsonlDecoder {
   private buffer = ''
   private ended = false
 
+  constructor(private readonly maxRecordCharacters = MAX_JSONL_RECORD_CHARACTERS) {}
+
   push(chunk: JsonlChunk): string[] {
     if (this.ended) {
       throw new Error('Cannot push data after the JSONL decoder has ended')
     }
 
     this.buffer += typeof chunk === 'string' ? chunk : this.decoder.write(Buffer.from(chunk))
-    return this.drainCompleteLines()
+    const lines = this.drainCompleteLines()
+    this.assertRecordBound()
+    return lines
   }
 
   end(chunk?: JsonlChunk): string[] {
@@ -84,6 +95,7 @@ export class StrictJsonlDecoder {
 
     const lines = this.drainCompleteLines()
     if (this.buffer.length > 0) {
+      this.assertRecordBound()
       lines.push(stripTrailingCarriageReturn(this.buffer))
       this.buffer = ''
     }
@@ -95,9 +107,18 @@ export class StrictJsonlDecoder {
     while (true) {
       const newlineIndex = this.buffer.indexOf('\n')
       if (newlineIndex === -1) return lines
+      if (newlineIndex > this.maxRecordCharacters) {
+        throw new Error('Pi RPC JSONL record exceeded its safety limit')
+      }
 
       lines.push(stripTrailingCarriageReturn(this.buffer.slice(0, newlineIndex)))
       this.buffer = this.buffer.slice(newlineIndex + 1)
+    }
+  }
+
+  private assertRecordBound(): void {
+    if (this.buffer.length > this.maxRecordCharacters) {
+      throw new Error('Pi RPC JSONL record exceeded its safety limit')
     }
   }
 }
@@ -112,18 +133,41 @@ export function decodeJsonlChunks(chunks: readonly JsonlChunk[]): string[] {
 }
 
 /** Attach a strict LF-only JSONL decoder to a Node readable stream. */
-export function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
+export function attachJsonlLineReader(
+  stream: Readable,
+  onLine: (line: string) => void,
+  onDecodeError?: (error: Error) => void
+): () => void {
   const decoder = new StrictJsonlDecoder()
+  let failed = false
+  const fail = (reason: unknown): void => {
+    if (failed) return
+    failed = true
+    const error = reason instanceof Error ? reason : new Error(String(reason))
+    stream.off('data', onData)
+    stream.off('end', onEnd)
+    if (onDecodeError) onDecodeError(error)
+    else stream.destroy(error)
+  }
   const onData = (chunk: JsonlChunk): void => {
-    for (const line of decoder.push(chunk)) onLine(line)
+    try {
+      for (const line of decoder.push(chunk)) onLine(line)
+    } catch (error) {
+      fail(error)
+    }
   }
   const onEnd = (): void => {
-    for (const line of decoder.end()) onLine(line)
+    try {
+      for (const line of decoder.end()) onLine(line)
+    } catch (error) {
+      fail(error)
+    }
   }
 
   stream.on('data', onData)
   stream.on('end', onEnd)
   return () => {
+    failed = true
     stream.off('data', onData)
     stream.off('end', onEnd)
   }
@@ -222,12 +266,24 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEventMap> {
       stdio: ['pipe', 'pipe', 'pipe']
     })
     this.child = child
-    this.detachStdoutReader = attachJsonlLineReader(child.stdout, (line) => this.handleLine(line))
+    this.detachStdoutReader = attachJsonlLineReader(
+      child.stdout,
+      (line) => this.handleLine(line),
+      (error) => {
+        this.emitError({
+          message: `Pi RPC framing failed: ${error.message}`,
+          recoverable: true,
+          source: 'framing',
+          cause: error
+        })
+        terminateChild(child, false)
+      }
+    )
 
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => {
-      this.stderrBuffer += chunk
-      this.emit('stderr', chunk)
+      this.stderrBuffer = keepTextTail(this.stderrBuffer + chunk, MAX_STDERR_CHARACTERS)
+      this.emit('stderr', keepTextTail(chunk, MAX_STDERR_CHARACTERS))
     })
 
     child.stdin.on('error', (error) => this.handleStreamError('stdin', error))
@@ -289,7 +345,7 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEventMap> {
     this.detachReader()
   }
 
-  async request<T = void>(command: PiRpcCommand): Promise<T> {
+  async request<T = void>(command: PiRpcCommand, timeoutMs = this.options.requestTimeoutMs): Promise<T> {
     const child = this.child
     if (!child || !this.isRunning || !child.stdin.writable) {
       throw new PiRpcProcessError('Pi RPC process is not running')
@@ -302,12 +358,12 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEventMap> {
 
     const response = new Promise<unknown>((resolve, reject) => {
       const pending: PendingRequest = { command: command.type, resolve, reject }
-      if (this.options.requestTimeoutMs && this.options.requestTimeoutMs > 0) {
+      if (timeoutMs && timeoutMs > 0) {
         pending.timer = setTimeout(() => {
           if (this.pendingRequests.delete(id)) {
             reject(new PiRpcCommandError(command.type, `Pi RPC request timed out: ${command.type}`))
           }
-        }, this.options.requestTimeoutMs)
+        }, timeoutMs)
       }
       this.pendingRequests.set(id, pending)
     })
@@ -360,12 +416,17 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEventMap> {
 
   async getMessages(): Promise<AgentMessage[]> {
     const data = await this.request<{ messages: AgentMessage[] }>({ type: 'get_messages' })
-    return data.messages
+    return data.messages.map(limitAgentMessage)
   }
 
   async getAvailableModels(): Promise<PiModel[]> {
     const data = await this.request<{ models: PiModel[] }>({ type: 'get_available_models' })
     return data.models
+  }
+
+  async getCommands(): Promise<PiCommand[]> {
+    const data = await this.request<{ commands: PiCommand[] }>({ type: 'get_commands' })
+    return Array.isArray(data.commands) ? data.commands : []
   }
 
   async setModel(provider: string, modelId: string): Promise<PiModel> {
@@ -374,6 +435,29 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEventMap> {
 
   async setThinkingLevel(level: PiThinkingLevel): Promise<void> {
     await this.request({ type: 'set_thinking_level', level })
+  }
+
+  async compact(customInstructions?: string): Promise<void> {
+    await this.request(
+      { type: 'compact', ...(customInstructions ? { customInstructions } : {}) },
+      COMPACTION_TIMEOUT_MS
+    )
+  }
+
+  async setAutoCompaction(enabled: boolean): Promise<void> {
+    await this.request({ type: 'set_auto_compaction', enabled })
+  }
+
+  async setAutoRetry(enabled: boolean): Promise<void> {
+    await this.request({ type: 'set_auto_retry', enabled })
+  }
+
+  async exportHtml(outputPath?: string): Promise<{ path: string }> {
+    return this.request({ type: 'export_html', ...(outputPath ? { outputPath } : {}) })
+  }
+
+  async setSessionName(name: string): Promise<void> {
+    await this.request({ type: 'set_session_name', name })
   }
 
   async fork(entryId: string): Promise<{ text: string; cancelled: boolean }> {
@@ -488,7 +572,7 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEventMap> {
         this.emit('agent-start')
         return
       case 'agent_end':
-        this.agentEndMessages = Array.isArray(event.messages) ? event.messages : []
+        this.agentEndMessages = Array.isArray(event.messages) ? event.messages.map(limitAgentMessage) : []
         this.pendingAgentEnd = true
         this.scheduleSettledFallback()
         return
@@ -497,15 +581,17 @@ export class PiRpcClient extends EventEmitter<PiRpcClientEventMap> {
         return
       case 'turn_end':
         this.emit('turn-end', {
-          message: event.message,
-          toolResults: Array.isArray(event.toolResults) ? event.toolResults : []
+          message: limitAgentMessage(event.message) as AssistantMessage,
+          toolResults: Array.isArray(event.toolResults)
+            ? event.toolResults.map((message) => limitAgentMessage(message) as ToolResultMessage)
+            : []
         })
         return
       case 'message_update':
         this.normalizeAssistantUpdate(event.assistantMessageEvent)
         return
       case 'message_end':
-        this.emit('message-end', event.message)
+        this.emit('message-end', limitAgentMessage(event.message))
         return
       case 'tool_execution_start': {
         const args = asRecord(event.args)
@@ -805,7 +891,9 @@ export function parseSessionTree(contents: Uint8Array | string): Omit<PiSessionT
 
     try {
       const value: unknown = JSON.parse(line)
-      if (isSessionEntry(value)) entries.push(value)
+      if (isSessionEntry(value)) {
+        entries.push(value.message ? { ...value, message: limitAgentMessage(value.message) } : value)
+      }
     } catch (error) {
       // A concurrent session append can leave only the final snapshot record
       // incomplete. Earlier corruption is surfaced instead of silently hidden.
@@ -878,13 +966,74 @@ function getPartialToolCall(
 
 function extractToolOutput(result: unknown): string {
   if (!isObject(result) || !Array.isArray(result.content)) return ''
-  return result.content
+  const output = result.content
     .map((part) => {
       if (typeof part === 'string') return part
       if (isObject(part) && part.type === 'text' && typeof part.text === 'string') return part.text
       return ''
     })
     .join('')
+  return truncateDisplayText(output)
+}
+
+function truncateDisplayText(value: string, maximum = MAX_TOOL_OUTPUT_CHARACTERS): string {
+  if (value.length <= maximum) return value
+  const tailLength = Math.floor(maximum / 4)
+  const headLength = maximum - tailLength
+  return `${value.slice(0, headLength)}\n\n[CodePi truncated ${value.length - maximum} characters]\n\n${value.slice(-tailLength)}`
+}
+
+function limitUserText(value: string): string {
+  return truncateDisplayText(collapseAttachedContext(value), 2 * 1024 * 1024)
+}
+
+/** Keep the renderer payload bounded without modifying Pi's session on disk. */
+function limitAgentMessage(message: AgentMessage): AgentMessage {
+  // Events arrive as unvalidated JSON from the Pi subprocess; a missing or
+  // unrecognized message must pass through rather than throw mid-stream.
+  if (!isObject(message)) return message
+  switch (message.role) {
+    case 'user':
+      return {
+        ...message,
+        content: typeof message.content === 'string'
+          ? limitUserText(message.content)
+          : message.content.map((part) => part.type === 'text'
+            ? { ...part, text: limitUserText(part.text) }
+            : { type: 'image' as const, ...(part.mimeType ? { mimeType: part.mimeType } : {}) })
+      }
+    case 'assistant':
+      return {
+        ...message,
+        content: message.content.map((part) => part.type === 'text'
+          ? { ...part, text: truncateDisplayText(part.text, 2 * 1024 * 1024) }
+          : part.type === 'thinking'
+            ? { ...part, thinking: truncateDisplayText(part.thinking, 2 * 1024 * 1024) }
+            : part)
+      }
+    case 'toolResult':
+      return { ...message, content: message.content.map((part) => ({ ...part, text: truncateDisplayText(part.text) })) }
+    case 'bashExecution':
+      return { ...message, output: truncateDisplayText(message.output) }
+    case 'custom':
+      return {
+        ...message,
+        content: typeof message.content === 'string'
+          ? truncateDisplayText(message.content)
+          : message.content.map((part) => part.type === 'text'
+            ? { ...part, text: truncateDisplayText(part.text) }
+            : { type: 'image' as const, ...(part.mimeType ? { mimeType: part.mimeType } : {}) })
+      }
+    case 'branchSummary':
+    case 'compactionSummary':
+      return { ...message, summary: truncateDisplayText(message.summary, 2 * 1024 * 1024) }
+    default:
+      return message
+  }
+}
+
+function keepTextTail(value: string, maximum: number): string {
+  return value.length <= maximum ? value : value.slice(-maximum)
 }
 
 function getAssistantError(message: AssistantMessage): string {

@@ -1,7 +1,9 @@
 export type ThemeMode = 'system' | 'light' | 'dark'
 export type ThreadStatus = 'idle' | 'running' | 'waiting' | 'error'
 export type DeliveryMode = 'prompt' | 'steer' | 'followUp'
-export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type CapabilityKind = 'extension' | 'skill'
+export type ExportFormat = 'markdown' | 'html'
 
 export interface WindowBounds {
   width: number
@@ -37,6 +39,37 @@ export interface ThreadRecord {
   sessionFile?: string
   lastError?: string
   worktree?: WorktreeRecord
+  pinned: boolean
+  archived: boolean
+  unread: boolean
+  tags: string[]
+  deletedAt?: number
+  disabledCapabilityIds: string[]
+  autoRetryEnabled: boolean
+  usageSnapshot?: ThreadUsageSnapshot
+}
+
+export interface ThreadUsageSnapshot {
+  sessionId: string
+  tokens: number
+  cost: number
+}
+
+export interface PromptTemplate {
+  id: string
+  title: string
+  prompt: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface UsageLedgerEntry {
+  id: string
+  projectId: string
+  threadId: string
+  timestamp: number
+  tokens: number
+  cost: number
 }
 
 export interface AppSettings {
@@ -47,9 +80,11 @@ export interface AppSettings {
 }
 
 export interface PersistedState {
-  version: 1
+  version: 2
   projects: ProjectRecord[]
   threads: ThreadRecord[]
+  promptLibrary: PromptTemplate[]
+  usageLedger: UsageLedgerEntry[]
   selectedThreadId?: string
   windowBounds: WindowBounds
   settings: AppSettings
@@ -181,6 +216,8 @@ export interface SessionState {
   sessionName?: string
   messageCount: number
   pendingMessageCount: number
+  autoCompactionEnabled?: boolean
+  autoRetryEnabled?: boolean
 }
 
 export interface SessionStats {
@@ -221,6 +258,105 @@ export interface OpenThreadResult {
   messages: AgentMessage[]
   models: PiModel[]
   tree: SessionTreeNode[]
+  commands: PiCommand[]
+  stats?: SessionStats
+}
+
+export interface PiCommand {
+  name: string
+  description?: string
+  source: 'extension' | 'prompt' | 'skill'
+  location?: 'user' | 'project' | 'path'
+  path?: string
+  sourceInfo?: {
+    path: string
+    source: string
+    scope: 'user' | 'project' | 'temporary'
+    origin: 'package' | 'top-level'
+    baseDir?: string
+  }
+}
+
+export interface PiCapability {
+  id: string
+  kind: CapabilityKind
+  name: string
+  description?: string
+  path: string
+  source: 'user' | 'project' | 'package' | 'settings'
+  packageName?: string
+  enabled: boolean
+  commandName?: string
+}
+
+export interface ComposerAttachment {
+  id: string
+  name: string
+  mimeType: string
+  size: number
+  kind: 'image' | 'text' | 'file'
+  data?: string
+  text?: string
+  path?: string
+}
+
+export interface WorkspaceFile {
+  path: string
+  name: string
+  status?: string
+}
+
+export interface WorkspaceFilePreview {
+  path: string
+  content: string
+  language: string
+  size: number
+  modifiedAt: number
+  binary: boolean
+  truncated: boolean
+}
+
+export interface ThreadSearchResult {
+  threadId: string
+  projectId: string
+  title: string
+  snippet: string
+  timestamp: number
+}
+
+export interface UsagePeriod {
+  tokens: number
+  cost: number
+  turns: number
+}
+
+export interface UsageDashboard {
+  today: UsagePeriod
+  month: UsagePeriod
+  days: Array<UsagePeriod & { date: string }>
+}
+
+export type TerminalEvent =
+  | { type: 'data'; terminalId: string; threadId: string; data: string }
+  | { type: 'exit'; terminalId: string; threadId: string; exitCode: number; signal?: number }
+
+export type PreviewEvent =
+  | { type: 'state'; threadId: string; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean }
+  | { type: 'error'; threadId: string; message: string }
+
+export interface ViewBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface ThreadUpdate {
+  title?: string
+  pinned?: boolean
+  archived?: boolean
+  unread?: boolean
+  tags?: string[]
 }
 
 export interface DiffLine {
@@ -256,8 +392,8 @@ export type ThreadEvent =
   | { type: 'text-delta'; threadId: string; delta: string; contentIndex: number }
   | { type: 'thinking-delta'; threadId: string; delta: string; contentIndex: number }
   | { type: 'tool-call-start'; threadId: string; toolCallId?: string; toolName?: string; contentIndex?: number }
-  | { type: 'tool-call-args'; threadId: string; toolCallId?: string; delta: string; contentIndex?: number }
-  | { type: 'tool-call-end'; threadId: string; toolCallId: string; toolName: string; args: Record<string, unknown> }
+  | { type: 'tool-call-args'; threadId: string; toolCallId?: string; toolName?: string; delta: string; contentIndex?: number }
+  | { type: 'tool-call-end'; threadId: string; toolCallId: string; toolName: string; args: Record<string, unknown>; contentIndex?: number }
   | { type: 'tool-output'; threadId: string; toolCallId: string; toolName: string; output: string; isError?: boolean; complete: boolean }
   | { type: 'message-end'; threadId: string; message: AgentMessage }
   | { type: 'turn-end'; threadId: string; message: AssistantMessage; toolResults: ToolResultMessage[] }
@@ -266,7 +402,7 @@ export type ThreadEvent =
   | { type: 'aborted'; threadId: string }
   | { type: 'error'; threadId: string; message: string; recoverable: boolean }
 
-export type MenuAction = 'new-thread' | 'new-project' | 'settings'
+export type MenuAction = 'new-thread' | 'new-project' | 'settings' | 'command-palette'
 
 export interface BootstrapData {
   state: PersistedState
@@ -296,17 +432,47 @@ export interface CodePiApi {
   selectThread(threadId?: string): Promise<void>
   openThread(threadId: string): Promise<OpenThreadResult>
   restartThread(threadId: string): Promise<OpenThreadResult>
-  sendMessage(threadId: string, message: string, mode: DeliveryMode): Promise<void>
+  restartThreadWithoutCapabilities(threadId: string): Promise<OpenThreadResult>
+  sendMessage(threadId: string, message: string, mode: DeliveryMode, attachments?: ComposerAttachment[]): Promise<void>
   abortThread(threadId: string): Promise<void>
   setModel(threadId: string, provider: string, modelId: string): Promise<PiModel>
   setThinkingLevel(threadId: string, level: ThinkingLevel): Promise<ThinkingLevel>
+  getCapabilities(threadId: string): Promise<PiCapability[]>
+  setCapabilityEnabled(threadId: string, capabilityId: string, enabled: boolean): Promise<OpenThreadResult>
+  getCommands(threadId: string): Promise<PiCommand[]>
+  compactThread(threadId: string, customInstructions?: string): Promise<SessionStats | undefined>
+  setAutoCompaction(threadId: string, enabled: boolean): Promise<boolean>
+  setAutoRetry(threadId: string, enabled: boolean): Promise<boolean>
+  getUsageDashboard(projectId?: string): Promise<UsageDashboard>
+  searchProjectFiles(threadId: string, query: string, limit?: number): Promise<WorkspaceFile[]>
+  getRecentFiles(threadId: string): Promise<WorkspaceFile[]>
+  pickAttachments(threadId: string): Promise<ComposerAttachment[]>
+  listPromptTemplates(): Promise<PromptTemplate[]>
+  savePromptTemplate(template: { id?: string; title: string; prompt: string }): Promise<PromptTemplate[]>
+  deletePromptTemplate(templateId: string): Promise<PromptTemplate[]>
   getHistory(threadId: string): Promise<{ tree: SessionTreeNode[]; leafId: string | null }>
   branchThread(sourceThreadId: string, entryId: string): Promise<ThreadRecord>
+  updateThread(threadId: string, update: ThreadUpdate): Promise<ThreadRecord>
+  duplicateThread(threadId: string): Promise<ThreadRecord>
+  restoreThread(threadId: string): Promise<ThreadRecord>
+  purgeThread(threadId: string): Promise<void>
+  searchThreads(query: string): Promise<ThreadSearchResult[]>
+  exportThread(threadId: string, format: ExportFormat): Promise<{ path: string } | null>
   getChanges(threadId: string): Promise<DiffFile[]>
   setFileStaged(threadId: string, path: string, staged: boolean): Promise<void>
   commit(input: CommitInput): Promise<{ commit: string; pushed: boolean }>
   applyToMain(threadId: string): Promise<void>
   openInEditor(threadId: string): Promise<void>
+  listWorkspaceFiles(threadId: string): Promise<WorkspaceFile[]>
+  readWorkspaceFile(threadId: string, path: string): Promise<WorkspaceFilePreview>
+  openTerminal(threadId: string, columns: number, rows: number): Promise<{ terminalId: string }>
+  writeTerminal(terminalId: string, data: string): Promise<void>
+  resizeTerminal(terminalId: string, columns: number, rows: number): Promise<void>
+  closeTerminal(terminalId: string): Promise<void>
+  openPreview(threadId: string, url: string, bounds: ViewBounds): Promise<void>
+  setPreviewBounds(threadId: string, bounds: ViewBounds): Promise<void>
+  previewAction(threadId: string, action: 'back' | 'forward' | 'reload'): Promise<void>
+  closePreview(threadId: string): Promise<void>
   openSettings(): Promise<void>
   getSettings(): Promise<AppSettings>
   saveSettings(settings: AppSettings): Promise<AppSettings>
@@ -314,4 +480,6 @@ export interface CodePiApi {
   onThreadEvent(listener: (event: ThreadEvent) => void): () => void
   onMenuAction(listener: (action: MenuAction) => void): () => void
   onThemeChanged(listener: (theme: 'light' | 'dark') => void): () => void
+  onTerminalEvent(listener: (event: TerminalEvent) => void): () => void
+  onPreviewEvent(listener: (event: PreviewEvent) => void): () => void
 }

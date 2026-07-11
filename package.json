@@ -1,12 +1,13 @@
 {
   "name": "codepi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "A macOS-first desktop command center for the Pi coding agent",
+  "license": "MIT",
   "author": "CodePi Contributors",
   "main": "out/main/index.js",
   "scripts": {
-    "postinstall": "node node_modules/electron/install.js",
+    "postinstall": "node node_modules/electron/install.js && electron-builder install-app-deps",
     "dev": "electron-vite dev",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -16,9 +17,12 @@
   },
   "dependencies": {
     "@tanstack/react-virtual": "3.14.5",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
     "dompurify": "3.4.11",
     "lucide-react": "1.24.0",
     "marked": "18.0.6",
+    "node-pty": "1.1.0",
     "parse-diff": "0.12.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
@@ -40,6 +44,9 @@
     "appId": "works.earendil.codepi",
     "productName": "CodePi",
     "asar": true,
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
+    ],
     "files": [
       "out/**/*",
       "package.json"
@@ -53,11 +60,15 @@
       "target": [
         {
           "target": "dir",
-          "arch": ["arm64"]
+          "arch": [
+            "arm64"
+          ]
         },
         {
           "target": "dmg",
-          "arch": ["arm64"]
+          "arch": [
+            "arm64"
+          ]
         }
       ],
       "hardenedRuntime": true,
@@ -67,6 +78,7 @@
       }
     },
     "dmg": {
+      "sign": true,
       "title": "CodePi ${version}",
       "artifactName": "CodePi-${version}-${arch}.${ext}",
       "window": {
@@ -74,8 +86,17 @@
         "height": 380
       },
       "contents": [
-        { "x": 140, "y": 190, "type": "file" },
-        { "x": 400, "y": 190, "type": "link", "path": "/Applications" }
+        {
+          "x": 140,
+          "y": 190,
+          "type": "file"
+        },
+        {
+          "x": 400,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     }
   }

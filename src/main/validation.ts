@@ -1,4 +1,15 @@
-import type { AppSettings, CommitInput, CreateThreadInput, DeliveryMode, ThemeMode } from '../shared/contracts'
+import type {
+  AppSettings,
+  CommitInput,
+  ComposerAttachment,
+  CreateThreadInput,
+  DeliveryMode,
+  ExportFormat,
+  ThreadUpdate,
+  ThemeMode,
+  ViewBounds
+} from '../shared/contracts'
+import { normalizeTags } from '../shared/tags'
 
 export function requireString(
   value: unknown,
@@ -21,6 +32,13 @@ export function requireId(value: unknown, name = 'id'): string {
 
 export function requireBoolean(value: unknown, name: string): boolean {
   if (typeof value !== 'boolean') throw new TypeError(`${name} must be a boolean`)
+  return value
+}
+
+export function requireInteger(value: unknown, name: string, minimum: number, maximum: number): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new TypeError(`${name} must be between ${minimum} and ${maximum}`)
+  }
   return value
 }
 
@@ -58,6 +76,53 @@ export function parseDeliveryMode(value: unknown): DeliveryMode {
     throw new TypeError('Delivery mode is invalid')
   }
   return value
+}
+
+export function parseAttachments(value: unknown): ComposerAttachment[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > 12) throw new TypeError('Attachments are invalid')
+  return value.map((item, index) => {
+    if (!isRecord(item)) throw new TypeError(`Attachment ${index + 1} is invalid`)
+    const kind = item.kind
+    if (kind !== 'image' && kind !== 'text' && kind !== 'file') throw new TypeError('Attachment kind is invalid')
+    const size = requireInteger(item.size, 'attachment size', 0, 25 * 1024 * 1024)
+    return {
+      id: requireString(item.id, 'attachment id', { max: 180 }),
+      name: requireString(item.name, 'attachment name', { max: 240 }),
+      mimeType: requireString(item.mimeType, 'attachment mime type', { max: 160 }),
+      size,
+      kind,
+      ...(typeof item.data === 'string' ? { data: requireString(item.data, 'attachment data', { max: 36_000_000 }) } : {}),
+      ...(typeof item.text === 'string' ? { text: requireString(item.text, 'attachment text', { max: 1_500_000, allowEmpty: true }) } : {}),
+      ...(typeof item.path === 'string' ? { path: requireString(item.path, 'attachment path', { max: 16_384 }) } : {})
+    }
+  })
+}
+
+export function parseThreadUpdate(value: unknown): ThreadUpdate {
+  if (!isRecord(value)) throw new TypeError('Thread update is invalid')
+  const result: ThreadUpdate = {}
+  if (value.title !== undefined) result.title = requireString(value.title, 'title', { max: 240 })
+  if (value.pinned !== undefined) result.pinned = requireBoolean(value.pinned, 'pinned')
+  if (value.archived !== undefined) result.archived = requireBoolean(value.archived, 'archived')
+  if (value.unread !== undefined) result.unread = requireBoolean(value.unread, 'unread')
+  if (value.tags !== undefined) result.tags = normalizeTags(value.tags as readonly string[])
+  return result
+}
+
+export function parseExportFormat(value: unknown): ExportFormat {
+  if (value !== 'markdown' && value !== 'html') throw new TypeError('Export format is invalid')
+  return value
+}
+
+export function parseViewBounds(value: unknown): ViewBounds {
+  if (!isRecord(value)) throw new TypeError('Preview bounds are invalid')
+  return {
+    x: requireInteger(value.x, 'preview x', 0, 20_000),
+    y: requireInteger(value.y, 'preview y', 0, 20_000),
+    width: requireInteger(value.width, 'preview width', 1, 20_000),
+    height: requireInteger(value.height, 'preview height', 1, 20_000)
+  }
 }
 
 export function parseSettings(value: unknown): AppSettings {

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, relative, resolve } from 'node:path'
 import { shell } from 'electron'
 import parseDiff from 'parse-diff'
@@ -41,6 +41,24 @@ function run(
 
 async function git(cwd: string, args: readonly string[], acceptedCodes?: readonly number[]): Promise<string> {
   return (await run('git', ['-c', 'core.quotepath=false', ...args], cwd, acceptedCodes)).stdout
+}
+
+function gitWithInput(cwd: string, args: readonly string[], input: string): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const child = execFile(
+      'git',
+      ['-c', 'core.quotepath=false', ...args],
+      { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true },
+      (error, stdout, stderr) => {
+        if (!error) {
+          resolvePromise()
+          return
+        }
+        reject(new Error(String(stderr ?? '').trim() || String(stdout ?? '').trim() || error.message))
+      }
+    )
+    child.stdin?.end(input)
+  })
 }
 
 function validThreadId(id: string): void {
@@ -113,10 +131,22 @@ export async function isGitProject(directory: string): Promise<boolean> {
   }
 }
 
-export async function createWorktree(projectPath: string, threadId: string): Promise<WorktreeRecord> {
+export async function createWorktree(
+  projectPath: string,
+  threadId: string,
+  seed?: ThreadRecord
+): Promise<WorktreeRecord> {
   validThreadId(threadId)
-  const baseCommit = (await git(projectPath, ['rev-parse', 'HEAD'])).trim()
-  let baseBranch = (await git(projectPath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], [0, 1])).trim()
+  const projectCommit = (await git(projectPath, ['rev-parse', 'HEAD'])).trim()
+  if (seed && !seed.worktree) throw new Error('The source thread is not isolated')
+  if (seed?.worktree && !/^[0-9a-f]{40,64}$/i.test(seed.worktree.baseCommit)) {
+    throw new Error('The source worktree base commit is invalid')
+  }
+  const startCommit = seed?.worktree
+    ? (await git(seed.cwd, ['rev-parse', 'HEAD'])).trim()
+    : projectCommit
+  const baseCommit = seed?.worktree?.baseCommit || projectCommit
+  let baseBranch = seed?.worktree?.baseBranch || (await git(projectPath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], [0, 1])).trim()
   if (!baseBranch) baseBranch = (await git(projectPath, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
   if (!baseBranch || baseBranch === 'HEAD') throw new Error('Create a branch before using an isolated worktree')
   const branch = `pi/${threadId}`
@@ -125,7 +155,7 @@ export async function createWorktree(projectPath: string, threadId: string): Pro
   await mkdir(dirname(worktreePath), { recursive: true })
   await excludePiGui(projectPath)
   try {
-    await git(projectPath, ['worktree', 'add', '-b', branch, worktreePath, baseCommit])
+    await git(projectPath, ['worktree', 'add', '-b', branch, worktreePath, startCommit])
   } catch (error) {
     await git(projectPath, ['worktree', 'remove', '--force', worktreePath]).catch(() => undefined)
     await rm(worktreePath, { recursive: true, force: true }).catch(() => undefined)
@@ -134,6 +164,26 @@ export async function createWorktree(projectPath: string, threadId: string): Pro
     throw error
   }
   return { path: worktreePath, branch, baseBranch, baseCommit }
+}
+
+/** Copy the source worktree's tracked and untracked working state onto a seeded worktree. */
+export async function copyWorktreeState(source: ThreadRecord, target: ThreadRecord): Promise<void> {
+  if (!source.worktree || !target.worktree) return
+  const patch = await git(source.cwd, ['diff', '--binary', 'HEAD', '--'])
+  if (patch.trim()) await gitWithInput(target.cwd, ['apply', '--whitespace=nowarn', '--'], patch)
+  const untracked = (await git(source.cwd, ['ls-files', '--others', '--exclude-standard', '-z', '--']))
+    .split('\0')
+    .filter(Boolean)
+    .slice(0, 5_000)
+  for (const relativePath of untracked) {
+    const from = resolve(source.cwd, relativePath)
+    const to = resolve(target.cwd, relativePath)
+    if (!pathWithin(source.cwd, from) || !pathWithin(target.cwd, to)) continue
+    const details = await lstat(from).catch(() => undefined)
+    if (!details?.isFile()) continue
+    await mkdir(dirname(to), { recursive: true })
+    await copyFile(from, to)
+  }
 }
 
 export async function removeWorktree(projectPath: string, thread: ThreadRecord): Promise<void> {
@@ -241,6 +291,8 @@ export async function commitChanges(
   message: string,
   push: boolean
 ): Promise<{ commit: string; pushed: boolean }> {
+  const staged = (await git(thread.cwd, ['diff', '--cached', '--name-only', '--'])).trim()
+  if (!staged) throw new Error('No files are staged. Stage the changes to commit first.')
   await git(thread.cwd, ['commit', '-m', message])
   const commit = (await git(thread.cwd, ['rev-parse', 'HEAD'])).trim()
   if (!push) return { commit, pushed: false }

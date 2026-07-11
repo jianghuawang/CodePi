@@ -1,33 +1,48 @@
-import { AlertTriangle, FolderPlus, Plus, RefreshCw } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { AlertTriangle, FolderPlus, Plus, RefreshCw, ShieldOff } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AgentMessage,
   BootstrapData,
+  ComposerAttachment,
   CreateThreadInput,
   DeliveryMode,
   MenuAction,
   OpenThreadResult,
+  PiCapability,
+  PromptTemplate,
   ProjectRecord,
   SessionState,
   ThinkingLevel,
   ThreadEvent,
   ThreadRecord,
+  ThreadSearchResult,
 } from '../shared/contracts'
 import { ChangesView } from './components/ChangesView'
+import { CommandPalette, type CommandPaletteAction } from './components/CommandPalette'
 import { Composer } from './components/Composer'
 import { NewThreadSheet } from './components/NewThreadSheet'
 import { Onboarding } from './components/Onboarding'
 import { Sidebar } from './components/Sidebar'
+import { TerminalPane } from './components/TerminalPane'
 import { ThreadHeader, type ThreadTab } from './components/ThreadHeader'
 import { Transcript } from './components/Transcript'
+import { WorkspaceDock, type WorkspaceDockTab } from './components/WorkspaceDock'
 import { useTheme } from './hooks/useTheme'
 import type { LiveSegment, LiveToolSegment, LiveTurn } from './ui-types'
 
 interface ThreadRuntime extends OpenThreadResult {
   live?: LiveTurn
   queuedCount: number
+  capabilities: PiCapability[]
   runtimeError?: string
 }
+
+interface DockState {
+  open: boolean
+  tab: WorkspaceDockTab
+}
+
+const optimisticUserMessages = new WeakSet<object>()
 
 function fallbackState(threadId: string): SessionState {
   return {
@@ -51,6 +66,23 @@ function messageText(message: AgentMessage): string {
 }
 
 function appendMessage(messages: AgentMessage[], message: AgentMessage): AgentMessage[] {
+  if (message.role === 'user') {
+    const authoritativeText = messageText(message)
+    const optimisticIndex = messages.findIndex((candidate) => {
+      if (candidate.role !== 'user' || !optimisticUserMessages.has(candidate)) return false
+      const draft = messageText(candidate)
+      return Math.abs(candidate.timestamp - message.timestamp) < 5 * 60_000 &&
+        (authoritativeText === draft ||
+          authoritativeText.startsWith(`${draft}\n\nAttached`) ||
+          authoritativeText.startsWith(`${draft}\n\n📎`))
+    })
+    if (optimisticIndex >= 0) {
+      optimisticUserMessages.delete(messages[optimisticIndex])
+      const next = [...messages]
+      next[optimisticIndex] = message
+      return next
+    }
+  }
   const duplicate = messages.some((candidate) => {
     if (candidate.role !== message.role) return false
     if (candidate.role === 'toolResult' && message.role === 'toolResult') return candidate.toolCallId === message.toolCallId
@@ -71,7 +103,9 @@ function findToolIndex(segments: Record<number, LiveSegment>, toolCallId?: strin
 }
 
 function makeTool(existing: LiveSegment | undefined, id = '', name = ''): LiveToolSegment {
-  if (existing?.type === 'tool') return { ...existing }
+  if (existing?.type === 'tool') {
+    return { ...existing, id: id || existing.id, name: name || existing.name }
+  }
   return { type: 'tool', id, name, argsText: '', output: '', isError: false, complete: false }
 }
 
@@ -79,12 +113,21 @@ export function App(): React.JSX.Element {
   const [bootstrap, setBootstrap] = useState<BootstrapData>()
   const [projects, setProjects] = useState<ProjectRecord[]>([])
   const [threads, setThreads] = useState<ThreadRecord[]>([])
+  const [templates, setTemplates] = useState<PromptTemplate[]>([])
   const [selectedThreadId, setSelectedThreadId] = useState<string>()
   const [runtimes, setRuntimes] = useState<Record<string, ThreadRuntime>>({})
+  const [dockByThread, setDockByThread] = useState<Record<string, DockState>>({})
+  // Presence of a key means the terminal pane stays mounted (keeping its PTY alive);
+  // the value controls whether the drawer is visible.
+  const [terminalByThread, setTerminalByThread] = useState<Record<string, boolean>>({})
   const [loadingThreadId, setLoadingThreadId] = useState<string>()
   const [fatalError, setFatalError] = useState<string>()
   const [newThreadProjectId, setNewThreadProjectId] = useState<string>()
   const [tabByThread, setTabByThread] = useState<Record<string, ThreadTab>>({})
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
+  const [threadSearchResults, setThreadSearchResults] = useState<ThreadSearchResult[]>([])
+  const [threadSearchPending, setThreadSearchPending] = useState(false)
+  const searchRequest = useRef(0)
   const theme = useTheme(bootstrap?.state.settings.theme ?? 'system')
 
   const loadThread = useCallback(async (threadId: string, restart = false) => {
@@ -94,13 +137,41 @@ export function App(): React.JSX.Element {
     try {
       await window.codePi.selectThread(threadId)
       const opened = restart ? await window.codePi.restartThread(threadId) : await window.codePi.openThread(threadId)
-      setRuntimes((current) => ({ ...current, [threadId]: { ...opened, queuedCount: opened.state.pendingMessageCount } }))
+      const capabilities = await window.codePi.getCapabilities(threadId).catch(() => [] as PiCapability[])
+      setRuntimes((current) => ({
+        ...current,
+        [threadId]: { ...opened, capabilities, queuedCount: opened.state.pendingMessageCount }
+      }))
+      setThreads((current) => current.map((thread) => thread.id === threadId ? { ...opened.thread, unread: false } : thread))
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason)
       setThreads((current) => current.map((thread) => thread.id === threadId
         ? thread.status === 'error' && thread.lastError
           ? thread
           : { ...thread, status: 'error', lastError: message }
+        : thread))
+    } finally {
+      setLoadingThreadId((current) => current === threadId ? undefined : current)
+    }
+  }, [])
+
+  const loadThreadWithoutCapabilities = useCallback(async (threadId: string) => {
+    setSelectedThreadId(threadId)
+    setLoadingThreadId(threadId)
+    setFatalError(undefined)
+    try {
+      await window.codePi.selectThread(threadId)
+      const opened = await window.codePi.restartThreadWithoutCapabilities(threadId)
+      const capabilities = await window.codePi.getCapabilities(threadId).catch(() => [] as PiCapability[])
+      setRuntimes((current) => ({
+        ...current,
+        [threadId]: { ...opened, capabilities, queuedCount: opened.state.pendingMessageCount }
+      }))
+      setThreads((current) => current.map((thread) => thread.id === threadId ? { ...opened.thread, unread: false } : thread))
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason)
+      setThreads((current) => current.map((thread) => thread.id === threadId
+        ? { ...thread, status: 'error', lastError: message }
         : thread))
     } finally {
       setLoadingThreadId((current) => current === threadId ? undefined : current)
@@ -115,6 +186,7 @@ export function App(): React.JSX.Element {
         setBootstrap(data)
         setProjects(data.state.projects)
         setThreads(data.state.threads)
+        setTemplates(data.state.promptLibrary)
         setSelectedThreadId(data.state.selectedThreadId)
         if (data.pi.available && data.state.selectedThreadId) void loadThread(data.state.selectedThreadId)
       })
@@ -134,7 +206,12 @@ export function App(): React.JSX.Element {
     const now = Date.now()
     if (event.type === 'status') {
       setThreads((current) => current.map((thread) => thread.id === event.threadId
-        ? { ...thread, status: event.status, lastError: event.error, updatedAt: now }
+        ? { ...thread, status: event.status, lastError: event.error }
+        : thread))
+    }
+    if (event.type === 'settled') {
+      setThreads((current) => current.map((thread) => thread.id === event.threadId
+        ? { ...thread, status: 'idle', unread: event.threadId !== selectedThreadId, updatedAt: now }
         : thread))
     }
 
@@ -173,14 +250,14 @@ export function App(): React.JSX.Element {
         case 'tool-call-args':
           withLive((live) => {
             const index = findToolIndex(live.segments, event.toolCallId, event.contentIndex)
-            const tool = makeTool(live.segments[index], event.toolCallId)
+            const tool = makeTool(live.segments[index], event.toolCallId, event.toolName)
             tool.argsText += event.delta
             return { ...live, segments: { ...live.segments, [index]: tool } }
           })
           break
         case 'tool-call-end':
           withLive((live) => {
-            const index = findToolIndex(live.segments, event.toolCallId)
+            const index = findToolIndex(live.segments, event.toolCallId, event.contentIndex)
             const tool = makeTool(live.segments[index], event.toolCallId, event.toolName)
             tool.name = event.toolName
             tool.args = event.args
@@ -225,7 +302,13 @@ export function App(): React.JSX.Element {
           next = { ...runtime, queuedCount: event.steering.length + event.followUp.length }
           break
         case 'settled':
-          next = { ...runtime, live: undefined, state: { ...runtime.state, isStreaming: false }, queuedCount: 0 }
+          next = {
+            ...runtime,
+            live: undefined,
+            state: { ...runtime.state, isStreaming: false },
+            queuedCount: 0,
+            ...(event.stats ? { stats: event.stats } : {})
+          }
           break
         case 'aborted':
           next = { ...runtime, live: undefined, state: { ...runtime.state, isStreaming: false } }
@@ -236,7 +319,7 @@ export function App(): React.JSX.Element {
       }
       return next === runtime ? current : { ...current, [event.threadId]: next }
     })
-  }), [])
+  }), [selectedThreadId])
 
   const addProject = useCallback(async (): Promise<ProjectRecord | undefined> => {
     const project = await window.codePi.addProject()
@@ -246,6 +329,9 @@ export function App(): React.JSX.Element {
   }, [])
 
   const beginNewThread = useCallback(async (projectId?: string) => {
+    if (selectedThreadId) {
+      await window.codePi.closePreview(selectedThreadId).catch(() => undefined)
+    }
     let target = projectId ? projects.find((project) => project.id === projectId) : undefined
     if (!target && selectedThreadId) {
       const selected = threads.find((thread) => thread.id === selectedThreadId)
@@ -260,6 +346,7 @@ export function App(): React.JSX.Element {
     if (action === 'settings') void window.codePi.openSettings()
     if (action === 'new-project') void addProject()
     if (action === 'new-thread') void beginNewThread()
+    if (action === 'command-palette') setCommandPaletteOpen(true)
   }), [addProject, beginNewThread])
 
   const selectedThread = threads.find((thread) => thread.id === selectedThreadId)
@@ -267,6 +354,25 @@ export function App(): React.JSX.Element {
   const selectedProject = projects.find((project) => project.id === selectedThread?.projectId)
   const newThreadProject = projects.find((project) => project.id === newThreadProjectId)
   const selectedTab = selectedThreadId ? tabByThread[selectedThreadId] ?? 'transcript' : 'transcript'
+  const selectedDock = selectedThreadId
+    ? dockByThread[selectedThreadId] ?? { open: false, tab: 'files' as const }
+    : undefined
+  const terminalMounted = selectedThreadId ? selectedThreadId in terminalByThread : false
+  const terminalOpen = selectedThreadId ? terminalByThread[selectedThreadId] ?? false : false
+
+  const toggleTerminal = useCallback((threadId: string) => {
+    setTerminalByThread((current) => ({ ...current, [threadId]: !(current[threadId] ?? false) }))
+  }, [])
+
+  useEffect(() => {
+    if (!commandPaletteOpen || !selectedThreadId) return
+    void window.codePi.closePreview(selectedThreadId).catch(() => undefined)
+    setDockByThread((current) => {
+      const dock = current[selectedThreadId]
+      if (!dock || dock.tab !== 'preview') return current
+      return { ...current, [selectedThreadId]: { ...dock, tab: 'files' } }
+    })
+  }, [commandPaletteOpen, selectedThreadId])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -277,6 +383,92 @@ export function App(): React.JSX.Element {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [selectedThread])
+
+  const updateManagedThread = useCallback(async (
+    thread: ThreadRecord,
+    update: Parameters<typeof window.codePi.updateThread>[1]
+  ): Promise<ThreadRecord> => {
+    const updated = await window.codePi.updateThread(thread.id, update)
+    setThreads((current) => current.map((item) => item.id === updated.id ? updated : item))
+    if (updated.archived && selectedThreadId === updated.id) {
+      setSelectedThreadId(undefined)
+      await window.codePi.selectThread(undefined)
+    }
+    return updated
+  }, [selectedThreadId])
+
+  const trashManagedThread = useCallback(async (thread: ThreadRecord): Promise<void> => {
+    await window.codePi.deleteThread(thread.id)
+    setThreads((current) => current.map((item) => item.id === thread.id
+      ? { ...item, deletedAt: Date.now(), status: 'idle', unread: false }
+      : item))
+    setDockByThread((current) => {
+      const next = { ...current }
+      delete next[thread.id]
+      return next
+    })
+    setTerminalByThread((current) => {
+      const next = { ...current }
+      delete next[thread.id]
+      return next
+    })
+    if (selectedThreadId === thread.id) {
+      setSelectedThreadId(undefined)
+      setRuntimes((current) => {
+        const next = { ...current }
+        delete next[thread.id]
+        return next
+      })
+    }
+  }, [selectedThreadId])
+
+  const searchAllThreads = useCallback((query: string) => {
+    const request = ++searchRequest.current
+    if (!query.trim()) {
+      setThreadSearchPending(false)
+      setThreadSearchResults([])
+      return
+    }
+    setThreadSearchPending(true)
+    void window.codePi.searchThreads(query).then((results) => {
+      if (request === searchRequest.current) setThreadSearchResults(results)
+    }).catch(() => {
+      if (request === searchRequest.current) setThreadSearchResults([])
+    }).finally(() => {
+      if (request === searchRequest.current) setThreadSearchPending(false)
+    })
+  }, [])
+
+  const paletteActions: CommandPaletteAction[] = selectedThread ? [
+    {
+      id: 'workspace-files',
+      label: 'Open Files',
+      detail: selectedThread.title,
+      keywords: ['workspace', 'file viewer'],
+      run: () => setDockByThread((current) => ({ ...current, [selectedThread.id]: { ...(current[selectedThread.id] ?? {}), open: true, tab: 'files' } }))
+    },
+    {
+      id: 'workspace-terminal',
+      label: 'Open Terminal',
+      detail: selectedThread.cwd,
+      keywords: ['shell', 'workspace'],
+      run: () => setTerminalByThread((current) => ({ ...current, [selectedThread.id]: true }))
+    },
+    {
+      id: 'workspace-preview',
+      label: 'Open App Preview',
+      detail: 'Localhost only',
+      keywords: ['browser', 'localhost', 'workspace'],
+      run: () => setDockByThread((current) => ({ ...current, [selectedThread.id]: { ...(current[selectedThread.id] ?? {}), open: true, tab: 'preview' } }))
+    },
+    ...(selectedProject?.isGit ? [{
+      id: 'show-changes',
+      label: 'Show Changes',
+      detail: selectedThread.title,
+      keywords: ['git', 'diff'],
+      run: () => setTabByThread((current) => ({ ...current, [selectedThread.id]: 'changes' }))
+    }] : [])
+  ] : []
 
   const shell = useMemo(() => {
     if (!bootstrap) return null
@@ -302,9 +494,14 @@ export function App(): React.JSX.Element {
           <AlertTriangle size={22} />
           <h1>Pi couldn’t open this thread</h1>
           <pre>{selectedThread.lastError ?? 'The Pi process exited before its session was ready.'}</pre>
-          <button className="button button-primary" onClick={() => void loadThread(selectedThread.id, true)}>
-            <RefreshCw size={13} /> Restart Pi
-          </button>
+          <div className="empty-actions">
+            <button className="button button-primary" onClick={() => void loadThread(selectedThread.id, true)}>
+              <RefreshCw size={13} /> Restart Pi
+            </button>
+            <button className="button button-secondary" onClick={() => void loadThreadWithoutCapabilities(selectedThread.id)}>
+                        <ShieldOff size={13} /> Restart with extensions &amp; skills off
+            </button>
+          </div>
         </div>
       )
     }
@@ -317,7 +514,12 @@ export function App(): React.JSX.Element {
           thread={selectedThread}
           tree={runtime.tree}
           isGit={Boolean(selectedProject?.isGit)}
+          projectId={selectedThread.projectId}
+          state={runtime.state}
+          stats={runtime.stats}
           tab={selectedTab}
+          workspaceOpen={Boolean(selectedDock?.open)}
+          terminalOpen={terminalOpen}
           onTabChange={(tab) => setTabByThread((current) => ({ ...current, [selectedThread.id]: tab }))}
           onLoadHistory={async () => {
             const history = await window.codePi.getHistory(selectedThread.id)
@@ -329,6 +531,22 @@ export function App(): React.JSX.Element {
             await loadThread(thread.id)
           }}
           onOpenEditor={() => void window.codePi.openInEditor(selectedThread.id)}
+          onToggleTerminal={() => toggleTerminal(selectedThread.id)}
+          onToggleWorkspace={() => setDockByThread((current) => ({
+            ...current,
+            [selectedThread.id]: {
+              ...(current[selectedThread.id] ?? { tab: 'files' }),
+              open: !(current[selectedThread.id]?.open ?? false)
+            }
+          }))}
+          onStateChange={(state) => setRuntimes((current) => ({
+            ...current,
+            [selectedThread.id]: { ...current[selectedThread.id], state }
+          }))}
+          onStatsChange={(stats) => setRuntimes((current) => ({
+            ...current,
+            [selectedThread.id]: { ...current[selectedThread.id], stats }
+          }))}
         />
         {selectedTab === 'transcript' ? (
           <div className="conversation-pane">
@@ -343,20 +561,55 @@ export function App(): React.JSX.Element {
                 <div className="thread-error-banner" role="alert">
                   <AlertTriangle size={15} />
                   <div><strong>Pi stopped unexpectedly</strong><span>{selectedThread.lastError ?? 'The agent process exited.'}</span></div>
-                  <button className="button button-secondary compact" onClick={() => void loadThread(selectedThread.id, true)}>
-                    <RefreshCw size={12} /> Restart
-                  </button>
+                  <div className="thread-error-actions">
+                    <button className="button button-secondary compact" onClick={() => void loadThread(selectedThread.id, true)}>
+                      <RefreshCw size={12} /> Restart
+                    </button>
+                    <button className="button button-secondary compact" onClick={() => void loadThreadWithoutCapabilities(selectedThread.id)} title="Disable all extensions and skills for this thread, then restart">
+                      <ShieldOff size={12} /> Safe restart
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
             <Transcript messages={runtime.messages} live={runtime.live} theme={theme} running={selectedThread.status === 'running'} />
-            <Composer
+            {selectedThread.archived ? (
+              <div className="archived-thread-notice">
+                <span>This thread is archived and read-only.</span>
+                <button className="button button-secondary compact" onClick={() => void updateManagedThread(selectedThread, { archived: false })}>
+                  Unarchive
+                </button>
+              </div>
+            ) : <Composer
+              threadId={selectedThread.id}
+              cwd={selectedThread.cwd}
               status={selectedThread.status}
               queuedCount={runtime.queuedCount}
               model={runtime.state.model}
               models={runtime.models}
               thinkingLevel={runtime.state.thinkingLevel}
+              commands={runtime.commands}
+              capabilities={runtime.capabilities}
+              templates={templates}
               onAbort={() => void window.codePi.abortThread(selectedThread.id)}
+              onRuntimeChanged={(opened) => {
+                setThreads((current) => current.map((thread) => thread.id === selectedThread.id ? opened.thread : thread))
+                setRuntimes((current) => ({
+                  ...current,
+                  [selectedThread.id]: {
+                    ...opened,
+                    capabilities: current[selectedThread.id]?.capabilities ?? [],
+                    queuedCount: opened.state.pendingMessageCount
+                  }
+                }))
+                void window.codePi.getCapabilities(selectedThread.id).then((capabilities) => {
+                  setRuntimes((current) => ({
+                    ...current,
+                    [selectedThread.id]: { ...current[selectedThread.id], capabilities }
+                  }))
+                }).catch(() => undefined)
+              }}
+              onTemplatesChanged={setTemplates}
               onSetModel={async (provider, modelId) => {
                 const model = await window.codePi.setModel(selectedThread.id, provider, modelId)
                 setRuntimes((current) => ({
@@ -377,16 +630,20 @@ export function App(): React.JSX.Element {
                   },
                 }))
               }}
-              onSend={async (text: string, mode: DeliveryMode) => {
+              onSend={async (text: string, mode: DeliveryMode, attachments: ComposerAttachment[]) => {
                 const optimistic = mode !== 'followUp'
                 const message: AgentMessage = { role: 'user', content: text, timestamp: Date.now() }
+                setThreads((current) => current.map((thread) => thread.id === selectedThread.id
+                  ? { ...thread, updatedAt: message.timestamp }
+                  : thread))
                 if (optimistic) {
+                  optimisticUserMessages.add(message)
                   setRuntimes((current) => ({ ...current, [selectedThread.id]: { ...current[selectedThread.id], messages: appendMessage(current[selectedThread.id].messages, message) } }))
                 } else {
                   setRuntimes((current) => ({ ...current, [selectedThread.id]: { ...current[selectedThread.id], queuedCount: current[selectedThread.id].queuedCount + 1 } }))
                 }
                 try {
-                  await window.codePi.sendMessage(selectedThread.id, text, mode)
+                  await window.codePi.sendMessage(selectedThread.id, text, mode, attachments)
                 } catch (reason) {
                   if (optimistic) {
                     setRuntimes((current) => ({ ...current, [selectedThread.id]: { ...current[selectedThread.id], messages: current[selectedThread.id].messages.filter((item) => item !== message) } }))
@@ -394,7 +651,7 @@ export function App(): React.JSX.Element {
                   throw reason
                 }
               }}
-            />
+            />}
           </div>
         ) : (
           <ChangesView
@@ -404,6 +661,11 @@ export function App(): React.JSX.Element {
             onApplyToMain={() => window.codePi.applyToMain(selectedThread.id)}
           />
         )}
+        {terminalMounted && (
+          <div className="thread-terminal-drawer" hidden={!terminalOpen}>
+            <TerminalPane key={selectedThread.id} threadId={selectedThread.id} theme={theme} active={terminalOpen} />
+          </div>
+        )}
       </div>
     )
   }, [
@@ -411,12 +673,18 @@ export function App(): React.JSX.Element {
     beginNewThread,
     bootstrap,
     loadThread,
+    loadThreadWithoutCapabilities,
     loadingThreadId,
     projects.length,
     runtime,
+    selectedDock,
     selectedTab,
     selectedThread,
+    templates,
+    terminalMounted,
+    terminalOpen,
     theme,
+    toggleTerminal,
   ])
 
   if (!bootstrap && !fatalError) return <div className="app-loading"><div className="pi-loader">π</div><span>Starting CodePi…</span></div>
@@ -435,24 +703,70 @@ export function App(): React.JSX.Element {
         }}
         onSelectThread={(threadId) => void loadThread(threadId)}
         onNewThread={(projectId) => void beginNewThread(projectId)}
-        onDeleteThread={(thread) => {
-          if (!window.confirm(`Delete “${thread.title}”?${thread.worktree ? '\n\nIts isolated worktree will also be removed.' : ''}`)) return
-          void window.codePi.deleteThread(thread.id).then(() => {
-            setThreads((current) => current.filter((item) => item.id !== thread.id))
-            setRuntimes((current) => {
-              const next = { ...current }
-              delete next[thread.id]
-              return next
-            })
-            if (selectedThreadId === thread.id) {
-              setSelectedThreadId(undefined)
-              void window.codePi.selectThread(undefined)
-            }
+        onRenameThread={(thread, title) => updateManagedThread(thread, { title })}
+        onDuplicateThread={async (thread) => {
+          const copy = await window.codePi.duplicateThread(thread.id)
+          setThreads((current) => [copy, ...current])
+          await loadThread(copy.id)
+        }}
+        onSetThreadArchived={(thread, archived) => updateManagedThread(thread, { archived })}
+        onSetThreadPinned={(thread, pinned) => updateManagedThread(thread, { pinned })}
+        onSetThreadUnread={(thread, unread) => updateManagedThread(thread, { unread })}
+        onSetThreadTags={(thread, tags) => updateManagedThread(thread, { tags })}
+        onExportThread={(thread, format) => window.codePi.exportThread(thread.id, format)}
+        onTrashThread={trashManagedThread}
+        onRestoreThread={async (thread) => {
+          const restored = await window.codePi.restoreThread(thread.id)
+          setThreads((current) => current.map((item) => item.id === restored.id ? restored : item))
+        }}
+        onPurgeThread={async (thread) => {
+          await window.codePi.purgeThread(thread.id)
+          setThreads((current) => current.filter((item) => item.id !== thread.id))
+          setRuntimes((current) => {
+            const next = { ...current }
+            delete next[thread.id]
+            return next
           })
         }}
+        onOpenCommandPalette={() => setCommandPaletteOpen(true)}
         onOpenSettings={() => void window.codePi.openSettings()}
       />
-      <main className="main-pane">{shell}</main>
+      <main className={`main-pane ${selectedDock?.open ? 'has-workspace-dock' : ''}`}>
+        <div className="main-content">{shell}</div>
+        {selectedThread && selectedDock?.open && (
+          <WorkspaceDock
+            threadId={selectedThread.id}
+            activeTab={selectedDock.tab}
+            onTabChange={(tab) => setDockByThread((current) => ({
+              ...current,
+              [selectedThread.id]: { ...(current[selectedThread.id] ?? {}), open: true, tab }
+            }))}
+            onClose={() => {
+              void window.codePi.closePreview(selectedThread.id).catch(() => undefined)
+              setDockByThread((current) => ({
+                ...current,
+                [selectedThread.id]: { ...(current[selectedThread.id] ?? { tab: 'files' }), open: false }
+              }))
+            }}
+          />
+        )}
+      </main>
+      <CommandPalette
+        open={commandPaletteOpen}
+        projects={projects}
+        threads={threads}
+        selectedThreadId={selectedThreadId}
+        actions={paletteActions}
+        searchResults={threadSearchResults}
+        searching={threadSearchPending}
+        onQueryChange={searchAllThreads}
+        onRequestOpen={() => setCommandPaletteOpen(true)}
+        onClose={() => setCommandPaletteOpen(false)}
+        onSelectThread={(threadId) => loadThread(threadId)}
+        onNewThread={(projectId) => beginNewThread(projectId)}
+        onAddProject={addProject}
+        onOpenSettings={() => window.codePi.openSettings()}
+      />
       {newThreadProject && (
         <NewThreadSheet
           project={newThreadProject}

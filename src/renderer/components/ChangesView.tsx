@@ -230,12 +230,13 @@ export function ChangesView({ thread, theme, onOpenEditor, onApplyToMain }: Chan
             onKeyDown={(event) => {
               if (event.key === 'Enter' && event.metaKey) void commit(false)
             }}
-            placeholder="Describe these changes"
+            placeholder={files.length === 0 ? 'No changes to commit' : 'Describe these changes'}
+            disabled={files.length === 0}
           />
-          <button className="button button-secondary" disabled={!commitMessage.trim() || Boolean(commitBusy)} onClick={() => void commit(false)}>
+          <button className="button button-secondary" disabled={files.length === 0 || !commitMessage.trim() || Boolean(commitBusy)} onClick={() => void commit(false)}>
             <GitCommitHorizontal size={13} /> {commitBusy === 'commit' ? 'Committing…' : 'Commit'}
           </button>
-          <button className="button button-primary" disabled={!commitMessage.trim() || Boolean(commitBusy)} onClick={() => void commit(true)}>
+          <button className="button button-primary" disabled={files.length === 0 || !commitMessage.trim() || Boolean(commitBusy)} onClick={() => void commit(true)}>
             <Upload size={13} /> {commitBusy === 'push' ? 'Pushing…' : 'Commit & Push'}
           </button>
         </div>

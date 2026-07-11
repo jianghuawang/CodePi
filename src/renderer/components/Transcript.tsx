@@ -7,6 +7,7 @@ import type {
   PiUsage,
   ToolResultMessage,
 } from '../../shared/contracts'
+import { collapseAttachedContext } from '../../shared/attachment-context'
 import type { LiveSegment, LiveToolSegment, LiveTurn } from '../ui-types'
 import { Markdown } from './Markdown'
 
@@ -142,9 +143,9 @@ function assistantContent(
 }
 
 function renderUserContent(message: Extract<AgentMessage, { role: 'user' }>): string {
-  if (typeof message.content === 'string') return message.content
+  if (typeof message.content === 'string') return collapseAttachedContext(message.content)
   return message.content
-    .map((content) => content.type === 'text' ? content.text : `[${content.mimeType ?? 'image'}]`)
+    .map((content) => content.type === 'text' ? collapseAttachedContext(content.text) : `[${content.mimeType ?? 'image'}]`)
     .join('\n')
 }
 

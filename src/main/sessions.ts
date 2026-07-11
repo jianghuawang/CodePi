@@ -239,6 +239,16 @@ export async function cloneSessionAtEntry(
   targetCwd: string,
   env: Record<string, string>
 ): Promise<string> {
+  return cloneSessionBranch(sourceFile, entryId, targetCwd, env, true)
+}
+
+export async function cloneSessionBranch(
+  sourceFile: string,
+  entryId: string,
+  targetCwd: string,
+  env: Record<string, string>,
+  rewindSelectedUser = false
+): Promise<string> {
   const document = parseDocument(await readFile(sourceFile, 'utf8'))
   const byId = new Map(document.entries.map((entry) => [entry.id, entry]))
   const selectedEntry = byId.get(entryId)
@@ -246,7 +256,7 @@ export async function cloneSessionAtEntry(
   // Pi's fork command rewinds to the parent of a selected user prompt so a
   // fork never opens with an unanswered user message at its leaf.
   const selectedMessage = selectedEntry.type === 'message' ? selectedEntry.message : undefined
-  const targetEntryId = selectedMessage?.role === 'user' ? selectedEntry.parentId : selectedEntry.id
+  const targetEntryId = rewindSelectedUser && selectedMessage?.role === 'user' ? selectedEntry.parentId : selectedEntry.id
   const branch: SessionEntry[] = []
   const seen = new Set<string>()
   let current = targetEntryId ? byId.get(targetEntryId) : undefined

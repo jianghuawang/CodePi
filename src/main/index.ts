@@ -19,14 +19,20 @@ import type {
   BootstrapData,
   MenuAction,
   PersistedState,
+  PreviewEvent,
   ProjectRecord,
+  TerminalEvent,
   ThinkingLevel,
   ThreadEvent,
-  ThreadRecord
+  ThreadRecord,
+  UsageDashboard
 } from '../shared/contracts'
+import { AttachmentService } from './attachment-service'
+import { exportThreadToPath } from './export-service'
 import {
   applyWorktreeToMain,
   commitChanges,
+  copyWorktreeState,
   createWorktree,
   getChanges,
   getWorktreeRemovalRisk,
@@ -36,24 +42,49 @@ import {
   setFileStaged
 } from './git-service'
 import { PiProcessManager } from './pi-manager'
+import {
+  disabledCapabilityIdsForSafeRestart,
+  listPiCapabilities
+} from './pi-capabilities'
 import { validatePiBinary } from './pi-validation'
 import { currentPlatform, mainWindowPlatformOptions, settingsWindowPlatformOptions } from './platform'
+import { PreviewService } from './preview-service'
+import { TranscriptSearchService } from './search-service'
 import {
+  cloneSessionBranch,
   cloneSessionAtEntry,
   discoverProjectSessions,
+  readSessionMessages,
+  readSessionTree,
   recoveredThreadId
 } from './sessions'
 import { StateStore } from './state-store'
+import { TerminalService } from './terminal-service'
+import {
+  aggregateUsageLedger,
+  deletePromptTemplate,
+  listPromptTemplates,
+  restoreTrashedThread,
+  savePromptTemplate,
+  updateThreadMetadata
+} from './thread-library'
 import {
   parseCommitInput,
+  parseAttachments,
   parseCreateThreadInput,
   parseDeliveryMode,
+  parseExportFormat,
   parseSettings,
+  parseThreadUpdate,
+  parseViewBounds,
+  isRecord,
   requireBoolean,
   requireId,
+  requireInteger,
   requireRepoPath,
   requireString
 } from './validation'
+import { WorkspaceService } from './workspace-service'
 
 const channels = {
   bootstrap: 'codepi:bootstrap',
@@ -64,30 +95,67 @@ const channels = {
   selectThread: 'codepi:select-thread',
   openThread: 'codepi:open-thread',
   restartThread: 'codepi:restart-thread',
+  restartThreadWithoutCapabilities: 'codepi:restart-thread-without-capabilities',
   sendMessage: 'codepi:send-message',
   abortThread: 'codepi:abort-thread',
   setModel: 'codepi:set-model',
   setThinkingLevel: 'codepi:set-thinking-level',
+  getCapabilities: 'codepi:get-capabilities',
+  setCapabilityEnabled: 'codepi:set-capability-enabled',
+  getCommands: 'codepi:get-commands',
+  compactThread: 'codepi:compact-thread',
+  setAutoCompaction: 'codepi:set-auto-compaction',
+  setAutoRetry: 'codepi:set-auto-retry',
+  getUsageDashboard: 'codepi:get-usage-dashboard',
+  searchProjectFiles: 'codepi:search-project-files',
+  getRecentFiles: 'codepi:get-recent-files',
+  pickAttachments: 'codepi:pick-attachments',
+  listPromptTemplates: 'codepi:list-prompt-templates',
+  savePromptTemplate: 'codepi:save-prompt-template',
+  deletePromptTemplate: 'codepi:delete-prompt-template',
   getHistory: 'codepi:get-history',
   branchThread: 'codepi:branch-thread',
+  updateThread: 'codepi:update-thread',
+  duplicateThread: 'codepi:duplicate-thread',
+  restoreThread: 'codepi:restore-thread',
+  purgeThread: 'codepi:purge-thread',
+  searchThreads: 'codepi:search-threads',
+  exportThread: 'codepi:export-thread',
   getChanges: 'codepi:get-changes',
   setFileStaged: 'codepi:set-file-staged',
   commit: 'codepi:commit',
   applyToMain: 'codepi:apply-to-main',
   openInEditor: 'codepi:open-in-editor',
+  listWorkspaceFiles: 'codepi:list-workspace-files',
+  readWorkspaceFile: 'codepi:read-workspace-file',
+  openTerminal: 'codepi:open-terminal',
+  writeTerminal: 'codepi:write-terminal',
+  resizeTerminal: 'codepi:resize-terminal',
+  closeTerminal: 'codepi:close-terminal',
+  openPreview: 'codepi:open-preview',
+  setPreviewBounds: 'codepi:set-preview-bounds',
+  previewAction: 'codepi:preview-action',
+  closePreview: 'codepi:close-preview',
   openSettings: 'codepi:open-settings',
   getSettings: 'codepi:get-settings',
   saveSettings: 'codepi:save-settings',
   validatePi: 'codepi:validate-pi',
   threadEvent: 'codepi:thread-event',
   menuAction: 'codepi:menu-action',
-  themeChanged: 'codepi:theme-changed'
+  themeChanged: 'codepi:theme-changed',
+  terminalEvent: 'codepi:terminal-event',
+  previewEvent: 'codepi:preview-event'
 } as const
 
 let mainWindow: BrowserWindow | null = null
 let settingsWindow: BrowserWindow | null = null
-let store: StateStore
-let processes: PiProcessManager
+let store!: StateStore
+let processes!: PiProcessManager
+let attachmentService!: AttachmentService
+let terminalService!: TerminalService
+let workspaceService!: WorkspaceService
+let previewService!: PreviewService
+const transcriptSearch = new TranscriptSearchService()
 let quitInProgress = false
 let readyToQuit = false
 
@@ -97,19 +165,46 @@ function publicState(): PersistedState {
 }
 
 function threadById(threadId: string): ThreadRecord {
-  const thread = store.snapshot().threads.find((item) => item.id === threadId)
+  const thread = store.peek().threads.find((item) => item.id === threadId)
   if (!thread) throw new Error('Thread not found')
-  return thread
+  return structuredClone(thread)
 }
 
 function projectById(projectId: string): ProjectRecord {
-  const project = store.snapshot().projects.find((item) => item.id === projectId)
+  const project = store.peek().projects.find((item) => item.id === projectId)
   if (!project) throw new Error('Project not found')
-  return project
+  return structuredClone(project)
+}
+
+function defaultThreadMetadata(): Pick<
+  ThreadRecord,
+  'pinned' | 'archived' | 'unread' | 'tags' | 'disabledCapabilityIds' | 'autoRetryEnabled'
+> {
+  const autoRetryEnabled = store?.peek().threads[0]?.autoRetryEnabled ?? true
+  return {
+    pinned: false,
+    archived: false,
+    unread: false,
+    tags: [],
+    disabledCapabilityIds: [],
+    autoRetryEnabled
+  }
+}
+
+function usageDashboard(projectId?: string): UsageDashboard {
+  return aggregateUsageLedger(store.peek().usageLedger, projectId)
 }
 
 function emitThreadEvent(event: ThreadEvent): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channels.threadEvent, event)
+}
+
+function emitTerminalEvent(event: TerminalEvent): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channels.terminalEvent, event)
+}
+
+function emitPreviewEvent(event: PreviewEvent): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channels.previewEvent, event)
 }
 
 function emitMenuAction(action: MenuAction): void {
@@ -293,6 +388,7 @@ function createMainWindow(): BrowserWindow {
   window.on('resize', persistBounds)
   window.on('move', persistBounds)
   window.on('closed', () => {
+    void previewService?.destroy().catch(() => undefined)
     if (mainWindow === window) mainWindow = null
   })
   void loadRenderer(window, 'main')
@@ -375,7 +471,9 @@ function createApplicationMenu(): void {
         { role: 'paste' },
         { role: 'pasteAndMatchStyle' },
         { role: 'delete' },
-        { role: 'selectAll' }
+        { role: 'selectAll' },
+        { type: 'separator' },
+        { label: 'Search Threads…', accelerator: 'CmdOrCtrl+K', click: () => emitMenuAction('command-palette') }
       ]
     },
     {
@@ -399,16 +497,30 @@ async function createThread(inputValue: unknown): Promise<ThreadRecord> {
   const now = Date.now()
   let cwd = project.path
   let worktree: ThreadRecord['worktree']
-  if (input.isolated && project.isGit) {
-    worktree = await createWorktree(project.path, id)
-    cwd = worktree.path
-  }
+  let source = input.branchFrom ? threadById(input.branchFrom.sourceThreadId) : undefined
+  if (source && source.projectId !== project.id) throw new Error('History can only branch within its project')
 
   let sessionFile: string | undefined
   try {
+    if (input.isolated && project.isGit) {
+      worktree = await createWorktree(project.path, id, source?.worktree ? source : undefined)
+      cwd = worktree.path
+      if (source?.worktree) {
+        await copyWorktreeState(source, {
+          id,
+          projectId: project.id,
+          title: input.title || 'New thread',
+          cwd,
+          status: 'idle',
+          createdAt: now,
+          updatedAt: now,
+          ...defaultThreadMetadata(),
+          worktree
+        })
+      }
+    }
     if (input.branchFrom) {
-      let source = threadById(input.branchFrom.sourceThreadId)
-      if (source.projectId !== project.id) throw new Error('History can only branch within its project')
+      if (!source) throw new Error('The source thread no longer exists')
       if (!source.sessionFile) {
         await processes.open(source.id)
         source = threadById(source.id)
@@ -431,6 +543,7 @@ async function createThread(inputValue: unknown): Promise<ThreadRecord> {
         status: 'idle',
         createdAt: now,
         updatedAt: now,
+        ...defaultThreadMetadata(),
         worktree
       }
       await removeWorktree(project.path, temporary).catch(() => undefined)
@@ -449,6 +562,7 @@ async function createThread(inputValue: unknown): Promise<ThreadRecord> {
     status: 'idle',
     createdAt: now,
     updatedAt: now,
+    ...defaultThreadMetadata(),
     ...(sessionFile ? { sessionFile } : {}),
     ...(worktree ? { worktree } : {})
   }
@@ -483,7 +597,8 @@ async function recoverSessions(): Promise<void> {
           status: 'idle',
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
-          sessionFile: file
+          sessionFile: file,
+          ...defaultThreadMetadata()
         })
         existing.add(file)
       }
@@ -491,6 +606,145 @@ async function recoverSessions(): Promise<void> {
     if (state.selectedThreadId && !state.threads.some((thread) => thread.id === state.selectedThreadId)) {
       state.selectedThreadId = undefined
     }
+  })
+}
+
+async function duplicateThreadRecord(sourceThreadId: string): Promise<ThreadRecord> {
+  const source = threadById(sourceThreadId)
+  if (source.deletedAt) throw new Error('Restore this thread before duplicating it')
+  const project = projectById(source.projectId)
+  const id = randomUUID()
+  const now = Date.now()
+  let cwd = project.path
+  let worktree: ThreadRecord['worktree']
+  let sessionFile: string | undefined
+  try {
+    if (source.worktree && project.isGit) {
+      worktree = await createWorktree(project.path, id, source)
+      cwd = worktree.path
+      await copyWorktreeState(source, {
+        id,
+        projectId: project.id,
+        title: `Copy of ${source.title}`,
+        cwd,
+        status: 'idle',
+        createdAt: now,
+        updatedAt: now,
+        ...defaultThreadMetadata(),
+        worktree
+      })
+    }
+    if (source.sessionFile) {
+      const history = await readSessionTree(source.sessionFile)
+      if (history.leafId) {
+        sessionFile = await cloneSessionBranch(
+          source.sessionFile,
+          history.leafId,
+          cwd,
+          store.snapshot().settings.env,
+          false
+        )
+      }
+    }
+  } catch (error) {
+    if (worktree) {
+      await removeWorktree(project.path, {
+        id,
+        projectId: project.id,
+        title: `Copy of ${source.title}`,
+        cwd,
+        status: 'idle',
+        createdAt: now,
+        updatedAt: now,
+        ...defaultThreadMetadata(),
+        worktree
+      }).catch(() => undefined)
+    }
+    throw error
+  }
+  const thread: ThreadRecord = {
+    id,
+    projectId: source.projectId,
+    title: `Copy of ${source.title}`.slice(0, 240),
+    cwd,
+    status: 'idle',
+    createdAt: now,
+    updatedAt: now,
+    ...defaultThreadMetadata(),
+    tags: [...source.tags],
+    disabledCapabilityIds: [...source.disabledCapabilityIds],
+    autoRetryEnabled: source.autoRetryEnabled,
+    ...(sessionFile ? { sessionFile } : {}),
+    ...(worktree ? { worktree } : {})
+  }
+  store.update((state) => {
+    state.threads.unshift(thread)
+    state.selectedThreadId = thread.id
+  })
+  return structuredClone(thread)
+}
+
+async function trashThread(threadId: string): Promise<void> {
+  threadById(threadId)
+  await Promise.allSettled([
+    processes.close(threadId),
+    terminalService.closeThread(threadId),
+    previewService.close(threadId)
+  ])
+  store.update((state) => {
+    const thread = state.threads.find((item) => item.id === threadId)
+    if (!thread) return
+    thread.deletedAt = Date.now()
+    thread.unread = false
+    thread.status = 'idle'
+    if (state.selectedThreadId === threadId) state.selectedThreadId = undefined
+  })
+}
+
+async function purgeThreadPermanently(threadId: string): Promise<void> {
+  const thread = threadById(threadId)
+  const project = projectById(thread.projectId)
+  await Promise.allSettled([
+    processes.close(threadId),
+    terminalService.closeThread(threadId),
+    previewService.close(threadId)
+  ])
+  if (thread.worktree) {
+    const risk = await getWorktreeRemovalRisk(thread).catch(() => ({ dirty: false, unpushedCommits: 0 }))
+    if (risk.dirty || risk.unpushedCommits > 0) {
+      const details = [
+        ...(risk.dirty ? ['uncommitted changes'] : []),
+        ...(risk.unpushedCommits > 0
+          ? [`${risk.unpushedCommits} unpushed commit${risk.unpushedCommits === 1 ? '' : 's'}`]
+          : [])
+      ].join(' and ')
+      const options = {
+        type: 'warning' as const,
+        title: 'Delete Thread Permanently?',
+        message: `This isolated worktree has ${details}.`,
+        detail: 'Permanent deletion removes its local worktree and branch. This cannot be undone.',
+        buttons: ['Cancel', 'Delete Permanently'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true
+      }
+      const answer = mainWindow && !mainWindow.isDestroyed()
+        ? await dialog.showMessageBox(mainWindow, options)
+        : await dialog.showMessageBox(options)
+      if (answer.response !== 1) throw new Error('Thread deletion was cancelled')
+    }
+    await removeWorktree(project.path, thread)
+  }
+  await attachmentService.cleanupThread(threadId)
+  transcriptSearch.clear(thread.sessionFile)
+  store.update((state) => {
+    state.threads = state.threads.filter((item) => item.id !== threadId)
+    if (thread.sessionFile) {
+      const dismissed = new Set(state.dismissedSessionFiles ?? [])
+      dismissed.add(resolve(thread.sessionFile))
+      state.dismissedSessionFiles = [...dismissed]
+    }
+    if (state.selectedThreadId === threadId) state.selectedThreadId = undefined
   })
 }
 
@@ -544,62 +798,56 @@ function registerIpc(): void {
   })
 
   handle(channels.createThread, (_event, input) => createThread(input))
-  handle(channels.deleteThread, async (_event, threadIdValue) => {
+  handle(channels.deleteThread, (_event, threadIdValue) => trashThread(requireId(threadIdValue, 'threadId')))
+
+  handle(channels.selectThread, async (_event, threadIdValue) => {
+    const previous = store.snapshot().selectedThreadId
+    const threadId = threadIdValue === undefined ? undefined : requireId(threadIdValue, 'threadId')
+    if (threadId) {
+      const thread = threadById(threadId)
+      if (thread.deletedAt) throw new Error('Restore this thread before opening it')
+    }
+    if (previous && previous !== threadId) await previewService.close(previous).catch(() => undefined)
+    store.update((state) => {
+      state.selectedThreadId = threadId
+      const selected = state.threads.find((item) => item.id === threadId)
+      if (selected) selected.unread = false
+    })
+  })
+
+  handle(channels.openThread, (_event, threadIdValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    if (threadById(threadId).deletedAt) throw new Error('Restore this thread before opening it')
+    return processes.open(threadId)
+  })
+  handle(channels.restartThread, (_event, threadIdValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    if (threadById(threadId).deletedAt) throw new Error('Restore this thread before opening it')
+    return processes.restart(threadId)
+  })
+  handle(channels.restartThreadWithoutCapabilities, async (_event, threadIdValue) => {
     const threadId = requireId(threadIdValue, 'threadId')
     const thread = threadById(threadId)
-    const project = projectById(thread.projectId)
-    await processes.close(threadId)
-    if (thread.worktree) {
-      const risk = await getWorktreeRemovalRisk(thread).catch(() => ({ dirty: false, unpushedCommits: 0 }))
-      if (risk.dirty || risk.unpushedCommits > 0) {
-        const details = [
-          ...(risk.dirty ? ['uncommitted changes'] : []),
-          ...(risk.unpushedCommits > 0
-            ? [`${risk.unpushedCommits} unpushed commit${risk.unpushedCommits === 1 ? '' : 's'}`]
-            : [])
-        ].join(' and ')
-        const options = {
-          type: 'warning' as const,
-          title: 'Delete Thread?',
-          message: `This isolated worktree has ${details}.`,
-          detail: 'Deleting the thread will permanently remove its local worktree and local branch.',
-          buttons: ['Cancel', 'Delete Thread'],
-          defaultId: 0,
-          cancelId: 0,
-          noLink: true
-        }
-        const answer = mainWindow && !mainWindow.isDestroyed()
-          ? await dialog.showMessageBox(mainWindow, options)
-          : await dialog.showMessageBox(options)
-        if (answer.response !== 1) throw new Error('Thread deletion was cancelled')
-      }
-      await removeWorktree(project.path, thread)
-    }
+    if (thread.deletedAt) throw new Error('Restore this thread before opening it')
+    const capabilities = await listPiCapabilities(thread, store.snapshot().settings)
     store.update((state) => {
-      state.threads = state.threads.filter((item) => item.id !== threadId)
-      if (thread.sessionFile) {
-        const dismissed = new Set(state.dismissedSessionFiles ?? [])
-        dismissed.add(resolve(thread.sessionFile))
-        state.dismissedSessionFiles = [...dismissed]
-      }
-      if (state.selectedThreadId === threadId) state.selectedThreadId = undefined
+      const current = state.threads.find((item) => item.id === threadId)
+      if (!current) return
+      current.disabledCapabilityIds = disabledCapabilityIdsForSafeRestart(
+        current.disabledCapabilityIds,
+        capabilities
+      )
     })
+    return processes.restart(threadId)
   })
-
-  handle(channels.selectThread, (_event, threadIdValue) => {
-    if (threadIdValue !== undefined) threadById(requireId(threadIdValue, 'threadId'))
-    store.update((state) => {
-      state.selectedThreadId = threadIdValue === undefined ? undefined : String(threadIdValue)
-    })
-  })
-
-  handle(channels.openThread, (_event, threadId) => processes.open(requireId(threadId, 'threadId')))
-  handle(channels.restartThread, (_event, threadId) => processes.restart(requireId(threadId, 'threadId')))
-  handle(channels.sendMessage, (_event, threadIdValue, messageValue, modeValue) => {
+  handle(channels.sendMessage, async (_event, threadIdValue, messageValue, modeValue, attachmentsValue) => {
     const threadId = requireId(threadIdValue, 'threadId')
-    threadById(threadId)
+    const thread = threadById(threadId)
+    if (thread.deletedAt) throw new Error('Restore this thread before sending')
+    if (thread.archived) throw new Error('Unarchive this thread before sending')
     const message = requireString(messageValue, 'message', { max: 2_000_000 })
-    return processes.send(threadId, message, parseDeliveryMode(modeValue))
+    const attachments = await attachmentService.prepare(thread, parseAttachments(attachmentsValue))
+    return processes.send(threadId, message, parseDeliveryMode(modeValue), attachments)
   })
   handle(channels.abortThread, (_event, threadId) => processes.abort(requireId(threadId, 'threadId')))
   handle(channels.setModel, (_event, threadIdValue, providerValue, modelValue) => {
@@ -617,6 +865,79 @@ function registerIpc(): void {
     if (!levels.includes(level as ThinkingLevel)) throw new Error('Invalid thinking level')
     return processes.setThinkingLevel(threadId, level as ThinkingLevel)
   })
+  handle(channels.getCapabilities, (_event, threadIdValue) => {
+    const thread = threadById(requireId(threadIdValue, 'threadId'))
+    return listPiCapabilities(thread, store.snapshot().settings)
+  })
+  handle(channels.setCapabilityEnabled, async (_event, threadIdValue, capabilityIdValue, enabledValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    const thread = threadById(threadId)
+    if (thread.status === 'running' || thread.status === 'waiting') {
+      throw new Error('Stop the active turn before changing extensions or skills')
+    }
+    const capabilityId = requireString(capabilityIdValue, 'capabilityId', { max: 256 })
+    const enabled = requireBoolean(enabledValue, 'enabled')
+    const capabilities = await listPiCapabilities(thread, store.snapshot().settings)
+    if (!capabilities.some((capability) => capability.id === capabilityId)) throw new Error('Capability not found')
+    store.update((state) => {
+      const current = state.threads.find((item) => item.id === threadId)
+      if (!current) return
+      const disabled = new Set(current.disabledCapabilityIds)
+      if (enabled) disabled.delete(capabilityId)
+      else disabled.add(capabilityId)
+      current.disabledCapabilityIds = [...disabled]
+    })
+    return processes.restart(threadId)
+  })
+  handle(channels.getCommands, (_event, threadIdValue) => processes.commands(requireId(threadIdValue, 'threadId')))
+  handle(channels.compactThread, (_event, threadIdValue, instructionsValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    const instructions = instructionsValue === undefined
+      ? undefined
+      : requireString(instructionsValue, 'compaction instructions', { max: 100_000, allowEmpty: true }).trim() || undefined
+    return processes.compact(threadId, instructions)
+  })
+  handle(channels.setAutoCompaction, (_event, threadIdValue, enabledValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    return processes.setAutoCompaction(threadId, requireBoolean(enabledValue, 'enabled'))
+  })
+  handle(channels.setAutoRetry, (_event, threadIdValue, enabledValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    return processes.setAutoRetry(threadId, requireBoolean(enabledValue, 'enabled'))
+  })
+  handle(channels.getUsageDashboard, (_event, projectIdValue) => {
+    const projectId = projectIdValue === undefined ? undefined : requireId(projectIdValue, 'projectId')
+    if (projectId) projectById(projectId)
+    return usageDashboard(projectId)
+  })
+  handle(channels.searchProjectFiles, (_event, threadIdValue, queryValue, limitValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    const query = requireString(queryValue, 'file query', { max: 1_000, allowEmpty: true })
+    const limit = limitValue === undefined ? 40 : requireInteger(limitValue, 'limit', 1, 100)
+    return workspaceService.searchFiles(threadId, query, limit)
+  })
+  handle(channels.getRecentFiles, (_event, threadIdValue) => {
+    return workspaceService.recentFiles(requireId(threadIdValue, 'threadId'))
+  })
+  handle(channels.pickAttachments, (_event, threadIdValue) => {
+    const thread = threadById(requireId(threadIdValue, 'threadId'))
+    const owner = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined
+    return attachmentService.pick(owner, thread)
+  })
+  handle(channels.listPromptTemplates, () => listPromptTemplates(store))
+  handle(channels.savePromptTemplate, (_event, value) => {
+    if (!isRecord(value)) throw new TypeError('Prompt template is invalid')
+    savePromptTemplate(store, {
+      ...(value.id === undefined ? {} : { id: requireId(value.id, 'templateId') }),
+      title: requireString(value.title, 'prompt title', { max: 120 }),
+      prompt: requireString(value.prompt, 'prompt', { max: 200_000 })
+    })
+    return listPromptTemplates(store)
+  })
+  handle(channels.deletePromptTemplate, (_event, templateIdValue) => {
+    deletePromptTemplate(store, requireId(templateIdValue, 'templateId'))
+    return listPromptTemplates(store)
+  })
   handle(channels.getHistory, (_event, threadId) => processes.history(requireId(threadId, 'threadId')))
   handle(channels.branchThread, (_event, sourceThreadIdValue, entryIdValue) => {
     const sourceThreadId = requireId(sourceThreadIdValue, 'sourceThreadId')
@@ -626,6 +947,100 @@ function registerIpc(): void {
       isolated: projectById(source.projectId).isGit,
       branchFrom: { sourceThreadId, entryId: requireId(entryIdValue, 'entryId') }
     })
+  })
+  handle(channels.updateThread, async (_event, threadIdValue, updateValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    const previous = threadById(threadId)
+    const update = parseThreadUpdate(updateValue)
+    const updated = updateThreadMetadata(store, threadId, update)
+    if (updated.title !== previous.title) await processes.setSessionName(threadId, updated.title).catch(() => undefined)
+    if (updated.archived && !previous.archived) {
+      await Promise.allSettled([
+        processes.close(threadId),
+        terminalService.closeThread(threadId),
+        previewService.close(threadId)
+      ])
+      store.update((state) => {
+        if (state.selectedThreadId === threadId) state.selectedThreadId = undefined
+      })
+    }
+    return threadById(threadId)
+  })
+  handle(channels.duplicateThread, (_event, threadIdValue) => {
+    return duplicateThreadRecord(requireId(threadIdValue, 'threadId'))
+  })
+  handle(channels.restoreThread, async (_event, threadIdValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    const thread = threadById(threadId)
+    if (!thread.deletedAt) throw new Error('Thread is not in Trash')
+    const details = await stat(thread.cwd).catch(() => undefined)
+    if (!details?.isDirectory()) {
+      throw new Error('The thread working directory no longer exists. Restore it before restoring the thread.')
+    }
+    return restoreTrashedThread(store, threadId)
+  })
+  handle(channels.purgeThread, async (_event, threadIdValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    const thread = threadById(threadId)
+    if (!thread.deletedAt) throw new Error('Move the thread to Trash before deleting it permanently')
+    const options = {
+      type: 'warning' as const,
+      title: 'Delete Thread Permanently?',
+      message: `Delete “${thread.title}” permanently?`,
+      detail: 'Its CodePi metadata and session listing will be removed. This cannot be undone.',
+      buttons: ['Cancel', 'Delete Permanently'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    }
+    const answer = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options)
+    if (answer.response !== 1) throw new Error('Permanent deletion was cancelled')
+    return purgeThreadPermanently(threadId)
+  })
+  handle(channels.searchThreads, (_event, queryValue) => {
+    const query = requireString(queryValue, 'search query', { max: 512, allowEmpty: true })
+    return transcriptSearch.search({
+      query,
+      threads: store.snapshot().threads.filter((thread) => !thread.deletedAt),
+      location: 'all',
+      limit: 80
+    }).then((results) => results.map(({ source: _source, score: _score, ...result }) => result))
+  })
+  handle(channels.exportThread, async (_event, threadIdValue, formatValue) => {
+    const thread = threadById(requireId(threadIdValue, 'threadId'))
+    const project = projectById(thread.projectId)
+    const format = parseExportFormat(formatValue)
+    const extension = format === 'markdown' ? 'md' : 'html'
+    const safeTitle = thread.title.replace(/[^A-Za-z0-9._ -]+/g, '-').trim().slice(0, 120) || 'CodePi-thread'
+    const options = {
+      title: `Export ${thread.title}`,
+      defaultPath: `${safeTitle}.${extension}`,
+      filters: [{ name: format === 'markdown' ? 'Markdown' : 'HTML', extensions: [extension] }]
+    }
+    const save = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showSaveDialog(mainWindow, options)
+      : await dialog.showSaveDialog(options)
+    if (save.canceled || !save.filePath) return null
+    // Prefer the raw session JSONL: processes.messages() bounds payloads for
+    // the renderer (truncated tool output, collapsed attachments, stripped
+    // image data), which must never leak into an export.
+    const messages = thread.sessionFile
+      ? await readSessionMessages(thread.sessionFile).catch(() => [])
+      : processes.has(thread.id)
+        ? await processes.messages(thread.id)
+        : []
+    const result = await exportThreadToPath({
+      thread,
+      messages,
+      projectName: project.name,
+      includeThinking: true,
+      includeTools: true,
+      outputPath: save.filePath,
+      format
+    })
+    return { path: result.path }
   })
 
   handle(channels.getChanges, (_event, threadIdValue) => {
@@ -663,6 +1078,52 @@ function registerIpc(): void {
     const thread = threadById(requireId(threadIdValue, 'threadId'))
     return openDirectoryInEditor(thread.cwd)
   })
+  handle(channels.listWorkspaceFiles, (_event, threadIdValue) => {
+    return workspaceService.listFiles(requireId(threadIdValue, 'threadId'))
+  })
+  handle(channels.readWorkspaceFile, (_event, threadIdValue, pathValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    return workspaceService.readFile(threadId, requireRepoPath(pathValue))
+  })
+  handle(channels.openTerminal, (_event, threadIdValue, columnsValue, rowsValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    const columns = requireInteger(columnsValue, 'columns', 2, 500)
+    const rows = requireInteger(rowsValue, 'rows', 1, 300)
+    return terminalService.open(threadId, columns, rows)
+  })
+  handle(channels.writeTerminal, (_event, terminalIdValue, dataValue) => {
+    const terminalId = requireId(terminalIdValue, 'terminalId')
+    terminalService.write(terminalId, requireString(dataValue, 'terminal input', { max: 64 * 1024, allowEmpty: true }))
+  })
+  handle(channels.resizeTerminal, (_event, terminalIdValue, columnsValue, rowsValue) => {
+    const terminalId = requireId(terminalIdValue, 'terminalId')
+    terminalService.resize(
+      terminalId,
+      requireInteger(columnsValue, 'columns', 2, 500),
+      requireInteger(rowsValue, 'rows', 1, 300)
+    )
+  })
+  handle(channels.closeTerminal, (_event, terminalIdValue) => {
+    return terminalService.close(requireId(terminalIdValue, 'terminalId'))
+  })
+  handle(channels.openPreview, (_event, threadIdValue, urlValue, boundsValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    const url = requireString(urlValue, 'preview URL', { max: 4_096 })
+    return previewService.open(threadId, url, parseViewBounds(boundsValue))
+  })
+  handle(channels.setPreviewBounds, (_event, threadIdValue, boundsValue) => {
+    previewService.setBounds(requireId(threadIdValue, 'threadId'), parseViewBounds(boundsValue))
+  })
+  handle(channels.previewAction, (_event, threadIdValue, actionValue) => {
+    const threadId = requireId(threadIdValue, 'threadId')
+    if (actionValue !== 'back' && actionValue !== 'forward' && actionValue !== 'reload') {
+      throw new TypeError('Preview action is invalid')
+    }
+    previewService.action(threadId, actionValue)
+  })
+  handle(channels.closePreview, (_event, threadIdValue) => {
+    return previewService.close(requireId(threadIdValue, 'threadId'))
+  })
 
   handle(channels.openSettings, () => openSettingsWindow())
   handle(channels.getSettings, () => store.snapshot().settings, 'settings')
@@ -683,12 +1144,16 @@ function registerIpc(): void {
 }
 
 async function start(): Promise<void> {
-app.setName('CodePi')
+  app.setName('CodePi')
   await app.whenReady()
   store = await StateStore.open(app.getPath('userData'))
   applyTheme(store.snapshot().settings)
   await recoverSessions()
   processes = new PiProcessManager(store, emitThreadEvent)
+  attachmentService = new AttachmentService(join(app.getPath('userData'), 'attachments'))
+  workspaceService = new WorkspaceService(threadById)
+  terminalService = new TerminalService(threadById, emitTerminalEvent)
+  previewService = new PreviewService(threadById, () => mainWindow, emitPreviewEvent)
   registerIpc()
   createApplicationMenu()
   mainWindow = createMainWindow()
@@ -709,13 +1174,18 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   if (quitInProgress) return
   quitInProgress = true
-  void Promise.allSettled([processes?.stopAll(), store?.flush()]).finally(() => {
+  void Promise.allSettled([
+    processes?.stopAll(),
+    terminalService?.stopAll(),
+    previewService?.destroy(),
+    store?.flush()
+  ]).finally(() => {
     readyToQuit = true
     app.quit()
   })
 })
 
 void start().catch((error) => {
-    dialog.showErrorBox('CodePi could not start', error instanceof Error ? error.message : String(error))
+  dialog.showErrorBox('CodePi could not start', error instanceof Error ? error.message : String(error))
   app.exit(1)
 })

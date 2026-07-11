@@ -36,4 +36,9 @@ describe('Pi RPC strict JSONL framing', () => {
     expect(lines).toHaveLength(1)
     expect(JSON.parse(lines[0])).toEqual(value)
   })
+
+  it('rejects an unterminated record that exceeds its safety limit', () => {
+    const decoder = new StrictJsonlDecoder(8)
+    expect(() => decoder.push('123456789')).toThrow(/safety limit/)
+  })
 })

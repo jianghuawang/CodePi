@@ -1,11 +1,17 @@
+import { randomUUID } from 'node:crypto'
 import type {
+  ComposerAttachment,
   OpenThreadResult,
+  PiCommand,
   PiModel,
   SessionStats,
   ThinkingLevel,
   ThreadEvent,
   ThreadRecord
 } from '../shared/contracts'
+import { attachedPathBlock, attachedTextBlock } from '../shared/attachment-context'
+import type { PiImageContent } from '../shared/pi-rpc-types'
+import { buildPiCapabilitySpawnArgs } from './pi-capabilities'
 import { PiRpcClient } from './pi-rpc'
 import { environmentForPi } from './pi-validation'
 import type { StateStore } from './state-store'
@@ -16,8 +22,27 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function buildPrompt(message: string, attachments: ComposerAttachment[]): { message: string; images: PiImageContent[] } {
+  const images: PiImageContent[] = []
+  const context: string[] = []
+  for (const attachment of attachments) {
+    if (attachment.kind === 'image' && attachment.data) {
+      images.push({ type: 'image', data: attachment.data.replace(/^data:[^;]+;base64,/, ''), mimeType: attachment.mimeType })
+      continue
+    }
+    if (attachment.kind === 'text' && attachment.text !== undefined) {
+      context.push(attachedTextBlock(attachment.name, attachment.text))
+      continue
+    }
+    if (attachment.path) context.push(attachedPathBlock(attachment.path))
+  }
+  return { message: context.length ? `${message}\n\n${context.join('\n\n')}` : message, images }
+}
+
 export class PiProcessManager {
   private readonly clients = new Map<string, PiRpcClient>()
+  private readonly starting = new Map<string, Promise<void>>()
+  private readonly opening = new Map<string, Promise<OpenThreadResult>>()
 
   constructor(
     private readonly store: StateStore,
@@ -29,45 +54,77 @@ export class PiProcessManager {
   }
 
   async open(threadId: string): Promise<OpenThreadResult> {
+    const pending = this.opening.get(threadId)
+    if (pending) return pending
+    const operation = this.openOnce(threadId)
+    this.opening.set(threadId, operation)
+    try {
+      return await operation
+    } finally {
+      if (this.opening.get(threadId) === operation) this.opening.delete(threadId)
+    }
+  }
+
+  private async openOnce(threadId: string): Promise<OpenThreadResult> {
     const thread = this.getThread(threadId)
     let client = this.clients.get(threadId)
     if (!client) {
       const settings = this.store.snapshot().settings
-      client = new PiRpcClient({
+      const created = new PiRpcClient({
         piPath: settings.piPath,
         cwd: thread.cwd,
         env: environmentForPi(settings.env),
         ...(thread.sessionFile ? { session: thread.sessionFile } : {}),
         ...(!thread.sessionFile && settings.defaultModel ? { model: settings.defaultModel } : {}),
-        requestTimeoutMs: 30_000
+        requestTimeoutMs: 30_000,
+        extraArgs: await buildPiCapabilitySpawnArgs(thread, settings)
       })
+      client = created
       this.attach(threadId, client)
       this.clients.set(threadId, client)
       this.setStatus(threadId, 'waiting')
+      const startup = (async () => {
+        await created.start()
+      })()
+      this.starting.set(threadId, startup)
       try {
-        await client.start()
+        await startup
       } catch (error) {
         this.clients.delete(threadId)
         await client.stop().catch(() => undefined)
         this.setStatus(threadId, 'error', errorMessage(error))
         throw error
+      } finally {
+        if (this.starting.get(threadId) === startup) this.starting.delete(threadId)
       }
+    } else {
+      await this.starting.get(threadId)
     }
 
     try {
-      const [state, messages, models, history] = await Promise.all([
+      const [state, messages, models, history, commands, stats] = await Promise.all([
         client.getState(),
         client.getMessages(),
         client.getAvailableModels(),
-        client.getTree()
+        client.getTree(),
+        client.getCommands().catch(() => [] as PiCommand[]),
+        client.getSessionStats().catch(() => undefined)
       ])
+      state.autoRetryEnabled = thread.autoRetryEnabled
       this.store.update((persisted) => {
         const current = persisted.threads.find((item) => item.id === threadId)
         if (!current) return
         current.status = state.isStreaming ? 'running' : 'idle'
         current.lastError = undefined
-        current.updatedAt = Date.now()
         if (state.sessionFile) current.sessionFile = state.sessionFile
+        const statsSessionId = stats?.sessionId ?? state.sessionId ?? current.id
+        if (stats && current.usageSnapshot?.sessionId !== statsSessionId) {
+          current.usageSnapshot = {
+            sessionId: statsSessionId,
+            tokens: stats.tokens.total,
+            cost: stats.cost
+          }
+        }
       })
       const current = this.getThread(threadId)
       this.emit({ type: 'status', threadId, status: current.status })
@@ -76,7 +133,9 @@ export class PiProcessManager {
         state,
         messages,
         models,
-        tree: history.tree
+        tree: history.tree,
+        commands,
+        ...(stats ? { stats } : {})
       }
     } catch (error) {
       const stderr = client.stderr.trim()
@@ -91,15 +150,21 @@ export class PiProcessManager {
     return this.open(threadId)
   }
 
-  async send(threadId: string, message: string, mode: 'prompt' | 'steer' | 'followUp'): Promise<void> {
+  async send(
+    threadId: string,
+    message: string,
+    mode: 'prompt' | 'steer' | 'followUp',
+    attachments: ComposerAttachment[] = []
+  ): Promise<void> {
     const client = await this.ensureClient(threadId)
+    const prompt = buildPrompt(message, attachments)
     this.store.update((state) => {
       const thread = state.threads.find((item) => item.id === threadId)
       if (thread) thread.updatedAt = Date.now()
     })
-    if (mode === 'steer') await client.steer(message)
-    else if (mode === 'followUp') await client.followUp(message)
-    else await client.prompt(message)
+    if (mode === 'steer') await client.steer(prompt.message, prompt.images)
+    else if (mode === 'followUp') await client.followUp(prompt.message, prompt.images)
+    else await client.prompt(prompt.message, prompt.images)
   }
 
   async abort(threadId: string): Promise<void> {
@@ -118,6 +183,61 @@ export class PiProcessManager {
     return level
   }
 
+  async commands(threadId: string): Promise<PiCommand[]> {
+    return (await this.ensureClient(threadId)).getCommands()
+  }
+
+  async stats(threadId: string): Promise<SessionStats | undefined> {
+    return (await this.ensureClient(threadId)).getSessionStats().catch(() => undefined)
+  }
+
+  async messages(threadId: string): Promise<Awaited<ReturnType<PiRpcClient['getMessages']>>> {
+    return (await this.ensureClient(threadId)).getMessages()
+  }
+
+  async compact(threadId: string, customInstructions?: string): Promise<SessionStats | undefined> {
+    const client = await this.ensureClient(threadId)
+    const state = await client.getState()
+    if (state.isStreaming) throw new Error('Stop the running turn before compacting context')
+    await client.compact(customInstructions)
+    return client.getSessionStats().catch(() => undefined)
+  }
+
+  async setAutoCompaction(threadId: string, enabled: boolean): Promise<boolean> {
+    const client = await this.ensureClient(threadId)
+    await client.setAutoCompaction(enabled)
+    await Promise.allSettled(
+      [...this.clients.entries()]
+        .filter(([id]) => id !== threadId)
+        .map(([, sibling]) => sibling.setAutoCompaction(enabled))
+    )
+    const state = await client.getState().catch(() => undefined)
+    return state?.autoCompactionEnabled ?? enabled
+  }
+
+  async setAutoRetry(threadId: string, enabled: boolean): Promise<boolean> {
+    const client = await this.ensureClient(threadId)
+    await client.setAutoRetry(enabled)
+    await Promise.allSettled(
+      [...this.clients.entries()]
+        .filter(([id]) => id !== threadId)
+        .map(([, sibling]) => sibling.setAutoRetry(enabled))
+    )
+    this.store.update((state) => {
+      for (const thread of state.threads) thread.autoRetryEnabled = enabled
+    })
+    return enabled
+  }
+
+  async exportHtml(threadId: string, outputPath: string): Promise<{ path: string }> {
+    return (await this.ensureClient(threadId)).exportHtml(outputPath)
+  }
+
+  async setSessionName(threadId: string, name: string): Promise<void> {
+    const client = this.clients.get(threadId)
+    if (client) await client.setSessionName(name)
+  }
+
   async history(threadId: string): Promise<{ tree: Awaited<ReturnType<PiRpcClient['getTree']>>['tree']; leafId: string | null }> {
     const client = await this.ensureClient(threadId)
     const history = await client.getTree()
@@ -125,9 +245,11 @@ export class PiProcessManager {
   }
 
   async close(threadId: string): Promise<void> {
+    await this.opening.get(threadId)?.catch(() => undefined)
     const client = this.clients.get(threadId)
     if (!client) return
     this.clients.delete(threadId)
+    this.starting.delete(threadId)
     await client.stop().catch(() => undefined)
     if (this.store.snapshot().threads.some((thread) => thread.id === threadId)) {
       this.setStatus(threadId, 'idle')
@@ -135,12 +257,16 @@ export class PiProcessManager {
   }
 
   async stopAll(): Promise<void> {
+    await Promise.allSettled([...this.opening.values()])
     const clients = [...this.clients.values()]
     this.clients.clear()
+    this.starting.clear()
+    this.opening.clear()
     await Promise.allSettled(clients.map((client) => client.stop()))
   }
 
   private async ensureClient(threadId: string): Promise<PiRpcClient> {
+    await this.opening.get(threadId)
     const existing = this.clients.get(threadId)
     if (existing) return existing
     await this.open(threadId)
@@ -160,7 +286,6 @@ export class PiProcessManager {
       const thread = state.threads.find((item) => item.id === threadId)
       if (!thread) return
       thread.status = status
-      thread.updatedAt = Date.now()
       thread.lastError = error
     })
     this.emit({ type: 'status', threadId, status, ...(error ? { error } : {}) })
@@ -210,6 +335,30 @@ export class PiProcessManager {
             if (!thread) return
             if (sessionFile) thread.sessionFile = sessionFile
             thread.updatedAt = Date.now()
+            thread.unread = state.selectedThreadId !== threadId
+            if (stats) {
+              const sameSession = thread.usageSnapshot?.sessionId === (stats.sessionId ?? currentState?.sessionId)
+              const previousTokens = sameSession ? thread.usageSnapshot?.tokens ?? 0 : 0
+              const previousCost = sameSession ? thread.usageSnapshot?.cost ?? 0 : 0
+              const tokens = Math.max(0, stats.tokens.total - previousTokens)
+              const cost = Math.max(0, stats.cost - previousCost)
+              if (tokens > 0 || cost > 0) {
+                state.usageLedger.push({
+                  id: randomUUID(),
+                  projectId: thread.projectId,
+                  threadId,
+                  timestamp: Date.now(),
+                  tokens,
+                  cost
+                })
+                if (state.usageLedger.length > 20_000) state.usageLedger.splice(0, state.usageLedger.length - 20_000)
+              }
+              thread.usageSnapshot = {
+                sessionId: stats.sessionId ?? currentState?.sessionId ?? thread.id,
+                tokens: stats.tokens.total,
+                cost: stats.cost
+              }
+            }
           })
           // Older Pi versions only emit agent_end. Avoid reporting a false
           // idle transition when a retry or compaction is already under way.

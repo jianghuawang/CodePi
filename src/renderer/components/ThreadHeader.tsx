@@ -1,7 +1,8 @@
-import { ExternalLink, GitBranch, History } from 'lucide-react'
+import { Activity, ExternalLink, GitBranch, History, PanelRight, TerminalSquare } from 'lucide-react'
 import { useRef, useState } from 'react'
-import type { SessionTreeNode, ThreadRecord } from '../../shared/contracts'
+import type { SessionState, SessionStats, SessionTreeNode, ThreadRecord } from '../../shared/contracts'
 import { useOutsideClick } from '../hooks/useOutsideClick'
+import { UsageDashboardPopover } from './UsageDashboardPopover'
 
 export type ThreadTab = 'transcript' | 'changes'
 
@@ -9,11 +10,20 @@ interface ThreadHeaderProps {
   thread: ThreadRecord
   tree: SessionTreeNode[]
   isGit: boolean
+  projectId: string
+  state: SessionState
+  stats?: SessionStats
   tab: ThreadTab
+  workspaceOpen: boolean
+  terminalOpen: boolean
   onTabChange: (tab: ThreadTab) => void
   onLoadHistory: () => Promise<void>
   onBranch: (entryId: string) => Promise<void>
   onOpenEditor: () => void
+  onToggleWorkspace: () => void
+  onToggleTerminal: () => void
+  onStateChange: (state: SessionState) => void
+  onStatsChange: (stats: SessionStats | undefined) => void
 }
 
 function messageLabel(node: SessionTreeNode): string {
@@ -66,15 +76,25 @@ export function ThreadHeader({
   thread,
   tree,
   isGit,
+  projectId,
+  state,
+  stats,
   tab,
+  workspaceOpen,
+  terminalOpen,
   onTabChange,
   onLoadHistory,
   onBranch,
   onOpenEditor,
+  onToggleWorkspace,
+  onToggleTerminal,
+  onStateChange,
+  onStatsChange,
 }: ThreadHeaderProps): React.JSX.Element {
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyError, setHistoryError] = useState<string>()
+  const [usageOpen, setUsageOpen] = useState(false)
   const historyRef = useRef<HTMLDivElement>(null)
   useOutsideClick(historyRef, () => setHistoryOpen(false), historyOpen)
 
@@ -117,6 +137,23 @@ export function ThreadHeader({
           <div className="thread-cwd" title={thread.cwd}>{thread.cwd}</div>
         </div>
         <div className="thread-actions no-drag">
+          <div className="usage-dashboard-wrap">
+            <button className={`header-button ${usageOpen ? 'is-active' : ''}`} onClick={() => setUsageOpen((open) => !open)}>
+              <Activity size={13} />
+              {stats?.contextUsage?.percent == null ? 'Usage' : `${Math.round(stats.contextUsage.percent)}%`}
+            </button>
+            {usageOpen && (
+              <UsageDashboardPopover
+                threadId={thread.id}
+                projectId={projectId}
+                state={state}
+                stats={stats}
+                onStateChange={onStateChange}
+                onStatsChange={onStatsChange}
+                onClose={() => setUsageOpen(false)}
+              />
+            )}
+          </div>
           <div className="history-wrap" ref={historyRef}>
             <button className={`header-button ${historyOpen ? 'is-active' : ''}`} onClick={() => void openHistory()}>
               <History size={13} /> History
@@ -148,6 +185,12 @@ export function ThreadHeader({
           </div>
           <button className="header-button icon-only" onClick={onOpenEditor} title="Open in editor" aria-label="Open in editor">
             <ExternalLink size={14} />
+          </button>
+          <button className={`header-button icon-only ${terminalOpen ? 'is-active' : ''}`} onClick={onToggleTerminal} title="Terminal" aria-label="Toggle terminal">
+            <TerminalSquare size={14} />
+          </button>
+          <button className={`header-button icon-only ${workspaceOpen ? 'is-active' : ''}`} onClick={onToggleWorkspace} title="Workspace tools" aria-label="Toggle workspace tools">
+            <PanelRight size={14} />
           </button>
         </div>
       </div>
