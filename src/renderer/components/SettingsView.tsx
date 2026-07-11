@@ -1,5 +1,5 @@
 import { Check, Eye, EyeOff, Plus, RefreshCw, Trash2 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { AppSettings } from '../../shared/contracts'
 import { useTheme } from '../hooks/useTheme'
 
@@ -37,7 +37,7 @@ export function SettingsView(): React.JSX.Element {
 
   const env = useMemo(() => Object.fromEntries(envRows.filter((row) => row.key.trim()).map((row) => [row.key.trim(), row.value])), [envRows])
 
-  const save = async () => {
+  const save = useCallback(async () => {
     if (!settings) return
     setSaving(true)
     setSaved(false)
@@ -52,7 +52,7 @@ export function SettingsView(): React.JSX.Element {
     } finally {
       setSaving(false)
     }
-  }
+  }, [env, settings])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -63,7 +63,7 @@ export function SettingsView(): React.JSX.Element {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [settings, envRows])
+  }, [save])
 
   if (loading) return <div className="settings-loading"><span className="spinner" /> Loading settings…</div>
   if (!settings) return <div className="settings-loading error-text">{error ?? 'Settings could not be loaded.'}</div>
@@ -99,8 +99,14 @@ export function SettingsView(): React.JSX.Element {
               onClick={async () => {
                 setValidating(true)
                 setValidation(undefined)
+                setError(undefined)
                 try {
                   setValidation(await window.codePi.validatePi(settings.piPath.trim()))
+                } catch (reason) {
+                  setValidation({
+                    available: false,
+                    error: reason instanceof Error ? reason.message : String(reason),
+                  })
                 } finally {
                   setValidating(false)
                 }

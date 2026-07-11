@@ -7,7 +7,7 @@ import {
   RefreshCw,
   Upload,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { DiffChunk, DiffFile, ThreadRecord } from '../../shared/contracts'
 import { highlightDiffLines } from './Markdown'
 
@@ -40,7 +40,7 @@ function DiffChunkView({ chunk, path, theme }: { chunk: DiffChunk; path: string;
     setHighlighted([])
     void highlightDiffLines(plainLines, languageForFile(path), theme).then((lines) => {
       if (!cancelled) setHighlighted(lines)
-    })
+    }).catch(() => undefined)
     return () => { cancelled = true }
   }, [path, plainLines, theme])
 
@@ -117,20 +117,25 @@ export function ChangesView({ thread, theme, onOpenEditor, onApplyToMain }: Chan
   const [commitBusy, setCommitBusy] = useState<'commit' | 'push'>()
   const [notice, setNotice] = useState<string>()
   const [applying, setApplying] = useState(false)
+  const loadRequest = useRef(0)
 
-  const load = async () => {
+  const load = useCallback(async () => {
+    const requestId = ++loadRequest.current
     setLoading(true)
     setError(undefined)
     try {
-      setFiles(await window.codePi.getChanges(thread.id))
+      const nextFiles = await window.codePi.getChanges(thread.id)
+      if (requestId === loadRequest.current) setFiles(nextFiles)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
+      if (requestId === loadRequest.current) {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      }
     } finally {
-      setLoading(false)
+      if (requestId === loadRequest.current) setLoading(false)
     }
-  }
+  }, [thread.id])
 
-  useEffect(() => { void load() }, [thread.id])
+  useEffect(() => { void load() }, [load])
 
   const commit = async (push: boolean) => {
     if (!commitMessage.trim()) return

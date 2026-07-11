@@ -33,7 +33,6 @@ export function WorkspaceDock({
 }: WorkspaceDockProps): React.JSX.Element {
   const [visitedTabs, setVisitedTabs] = useState<Set<WorkspaceDockTab>>(() => new Set([activeTab]))
 
-  useEffect(() => setVisitedTabs(new Set([activeTab])), [threadId])
   useEffect(() => {
     setVisitedTabs((current) => {
       if (current.has(activeTab)) return current

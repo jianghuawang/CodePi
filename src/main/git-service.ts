@@ -211,36 +211,29 @@ export async function getWorktreeRemovalRisk(thread: ThreadRecord): Promise<{
 }> {
   if (!thread.worktree) return { dirty: false, unpushedCommits: 0 }
   const dirty = Boolean((await git(thread.worktree.path, ['status', '--porcelain'])).trim())
-  let unpushedCommits = 0
   const upstream = await git(
     thread.worktree.path,
     ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'],
     [0, 1, 128]
   ).catch(() => '')
-  if (upstream.trim()) {
-    unpushedCommits = Number.parseInt(
-      (await git(thread.worktree.path, ['rev-list', '--count', '@{upstream}..HEAD'])).trim(),
-      10
-    ) || 0
-  } else {
-    unpushedCommits = Number.parseInt(
-      (await git(thread.worktree.path, ['rev-list', '--count', `${thread.worktree.baseCommit}..HEAD`])).trim(),
-      10
-    ) || 0
-  }
+  const revisionRange = upstream.trim() ? '@{upstream}..HEAD' : `${thread.worktree.baseCommit}..HEAD`
+  const unpushedCommits = Number.parseInt(
+    (await git(thread.worktree.path, ['rev-list', '--count', revisionRange])).trim(),
+    10
+  ) || 0
   return { dirty, unpushedCommits }
 }
 
 export async function getChanges(thread: ThreadRecord): Promise<DiffFile[]> {
   const base = thread.worktree?.baseCommit ?? 'HEAD'
-  let raw = ''
-  try {
-    raw = await git(thread.cwd, ['diff', '--no-ext-diff', '--no-color', '--find-renames', base, '--'])
-  } catch {
+  const raw = await git(
+    thread.cwd,
+    ['diff', '--no-ext-diff', '--no-color', '--find-renames', base, '--']
+  ).catch(async () => {
     const unstaged = await git(thread.cwd, ['diff', '--no-ext-diff', '--no-color', '--find-renames', '--']).catch(() => '')
     const staged = await git(thread.cwd, ['diff', '--cached', '--no-ext-diff', '--no-color', '--find-renames', '--']).catch(() => '')
-    raw = `${unstaged}\n${staged}`
-  }
+    return `${unstaged}\n${staged}`
+  })
   const stagedOutput = await git(thread.cwd, ['diff', '--cached', '--name-only', '-z', '--']).catch(() => '')
   const stagedPaths = new Set(stagedOutput.split('\0').filter(Boolean))
   const stageablePaths = thread.worktree

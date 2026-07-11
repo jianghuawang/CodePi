@@ -18,7 +18,7 @@ import {
   Trash2,
   Wrench
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   ComposerAttachment,
   OpenThreadResult,
@@ -127,7 +127,7 @@ export function ComposerContextMenu({
   useEffect(() => setCapabilityState(capabilities), [capabilities])
   useEffect(() => setTemplateState(templates), [templates])
 
-  const loadRecent = async () => {
+  const loadRecent = useCallback(async () => {
     setRecentLoading(true)
     setError(undefined)
     try {
@@ -137,11 +137,11 @@ export function ComposerContextMenu({
     } finally {
       setRecentLoading(false)
     }
-  }
+  }, [threadId])
 
   useEffect(() => {
     void loadRecent()
-  }, [threadId])
+  }, [loadRecent])
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {

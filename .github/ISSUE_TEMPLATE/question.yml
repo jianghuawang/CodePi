@@ -1,0 +1,21 @@
+name: Question or support request
+description: Ask for help using or building CodePi.
+title: "[Question]: "
+labels: [question]
+body:
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: CodePi version, macOS version, Node.js version, and `pi --version` when relevant.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Explain what you are trying to accomplish and where you are stuck.
+    validations:
+      required: true
+  - type: textarea
+    id: attempts
+    attributes:
+      label: What have you tried?

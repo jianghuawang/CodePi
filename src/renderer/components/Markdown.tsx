@@ -35,7 +35,10 @@ function getHighlighter(): Promise<Highlighter> {
       ],
       engine: createJavaScriptRegexEngine({ target: 'ES2024' }),
     }),
-  )
+  ).catch((error: unknown) => {
+    highlighterPromise = undefined
+    throw error
+  })
   return highlighterPromise
 }
 
@@ -121,7 +124,7 @@ export function Markdown({ children, theme, className = '' }: MarkdownProps): Re
     const timer = window.setTimeout(() => {
       void highlightCode(initial, theme).then((value) => {
         if (!cancelled) setHtml(value)
-      })
+      }).catch(() => undefined)
     }, 100)
     return () => {
       cancelled = true

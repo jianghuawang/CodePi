@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { realpath, stat } from 'node:fs/promises'
+import { mkdir, realpath, stat } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import {
   app,
@@ -27,6 +27,7 @@ import type {
   ThreadRecord,
   UsageDashboard
 } from '../shared/contracts'
+import { ipcChannels as channels } from '../shared/ipc-channels'
 import { AttachmentService } from './attachment-service'
 import { exportThreadToPath } from './export-service'
 import {
@@ -85,67 +86,6 @@ import {
   requireString
 } from './validation'
 import { WorkspaceService } from './workspace-service'
-
-const channels = {
-  bootstrap: 'codepi:bootstrap',
-  addProject: 'codepi:add-project',
-  toggleProject: 'codepi:toggle-project',
-  createThread: 'codepi:create-thread',
-  deleteThread: 'codepi:delete-thread',
-  selectThread: 'codepi:select-thread',
-  openThread: 'codepi:open-thread',
-  restartThread: 'codepi:restart-thread',
-  restartThreadWithoutCapabilities: 'codepi:restart-thread-without-capabilities',
-  sendMessage: 'codepi:send-message',
-  abortThread: 'codepi:abort-thread',
-  setModel: 'codepi:set-model',
-  setThinkingLevel: 'codepi:set-thinking-level',
-  getCapabilities: 'codepi:get-capabilities',
-  setCapabilityEnabled: 'codepi:set-capability-enabled',
-  getCommands: 'codepi:get-commands',
-  compactThread: 'codepi:compact-thread',
-  setAutoCompaction: 'codepi:set-auto-compaction',
-  setAutoRetry: 'codepi:set-auto-retry',
-  getUsageDashboard: 'codepi:get-usage-dashboard',
-  searchProjectFiles: 'codepi:search-project-files',
-  getRecentFiles: 'codepi:get-recent-files',
-  pickAttachments: 'codepi:pick-attachments',
-  listPromptTemplates: 'codepi:list-prompt-templates',
-  savePromptTemplate: 'codepi:save-prompt-template',
-  deletePromptTemplate: 'codepi:delete-prompt-template',
-  getHistory: 'codepi:get-history',
-  branchThread: 'codepi:branch-thread',
-  updateThread: 'codepi:update-thread',
-  duplicateThread: 'codepi:duplicate-thread',
-  restoreThread: 'codepi:restore-thread',
-  purgeThread: 'codepi:purge-thread',
-  searchThreads: 'codepi:search-threads',
-  exportThread: 'codepi:export-thread',
-  getChanges: 'codepi:get-changes',
-  setFileStaged: 'codepi:set-file-staged',
-  commit: 'codepi:commit',
-  applyToMain: 'codepi:apply-to-main',
-  openInEditor: 'codepi:open-in-editor',
-  listWorkspaceFiles: 'codepi:list-workspace-files',
-  readWorkspaceFile: 'codepi:read-workspace-file',
-  openTerminal: 'codepi:open-terminal',
-  writeTerminal: 'codepi:write-terminal',
-  resizeTerminal: 'codepi:resize-terminal',
-  closeTerminal: 'codepi:close-terminal',
-  openPreview: 'codepi:open-preview',
-  setPreviewBounds: 'codepi:set-preview-bounds',
-  previewAction: 'codepi:preview-action',
-  closePreview: 'codepi:close-preview',
-  openSettings: 'codepi:open-settings',
-  getSettings: 'codepi:get-settings',
-  saveSettings: 'codepi:save-settings',
-  validatePi: 'codepi:validate-pi',
-  threadEvent: 'codepi:thread-event',
-  menuAction: 'codepi:menu-action',
-  themeChanged: 'codepi:theme-changed',
-  terminalEvent: 'codepi:terminal-event',
-  previewEvent: 'codepi:preview-event'
-} as const
 
 let mainWindow: BrowserWindow | null = null
 let settingsWindow: BrowserWindow | null = null
@@ -387,11 +327,24 @@ function createMainWindow(): BrowserWindow {
   }
   window.on('resize', persistBounds)
   window.on('move', persistBounds)
+  const cleanupRendererResources = (): void => {
+    void Promise.allSettled([
+      previewService?.destroy(),
+      terminalService?.stopAll()
+    ])
+  }
+  window.webContents.on('render-process-gone', cleanupRendererResources)
   window.on('closed', () => {
-    void previewService?.destroy().catch(() => undefined)
+    cleanupRendererResources()
     if (mainWindow === window) mainWindow = null
   })
-  void loadRenderer(window, 'main')
+  void loadRenderer(window, 'main').catch((error: unknown) => {
+    if (!window.isDestroyed()) window.destroy()
+    dialog.showErrorBox(
+      'CodePi window could not load',
+      error instanceof Error ? error.message : String(error)
+    )
+  })
   return window
 }
 
@@ -1027,7 +980,7 @@ function registerIpc(): void {
     // the renderer (truncated tool output, collapsed attachments, stripped
     // image data), which must never leak into an export.
     const messages = thread.sessionFile
-      ? await readSessionMessages(thread.sessionFile).catch(() => [])
+      ? await readSessionMessages(thread.sessionFile)
       : processes.has(thread.id)
         ? await processes.messages(thread.id)
         : []
@@ -1145,6 +1098,12 @@ function registerIpc(): void {
 
 async function start(): Promise<void> {
   app.setName('CodePi')
+  const developmentUserData = process.env.CODEPI_USER_DATA_DIR?.trim()
+  if (!app.isPackaged && developmentUserData) {
+    const userDataPath = resolve(developmentUserData)
+    await mkdir(userDataPath, { recursive: true })
+    app.setPath('userData', userDataPath)
+  }
   await app.whenReady()
   store = await StateStore.open(app.getPath('userData'))
   applyTheme(store.snapshot().settings)
@@ -1174,12 +1133,21 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   if (quitInProgress) return
   quitInProgress = true
-  void Promise.allSettled([
-    processes?.stopAll(),
-    terminalService?.stopAll(),
-    previewService?.destroy(),
-    store?.flush()
-  ]).finally(() => {
+  const shutdownTasks = [
+    processes?.stopAll() ?? Promise.resolve(),
+    terminalService?.stopAll() ?? Promise.resolve(),
+    previewService?.destroy() ?? Promise.resolve(),
+    store?.flush() ?? Promise.resolve()
+  ]
+  void Promise.allSettled(shutdownTasks).then((results) => {
+    const stateFlush = results[3]
+    if (stateFlush.status === 'rejected') {
+      dialog.showErrorBox(
+        'CodePi could not save its state',
+        stateFlush.reason instanceof Error ? stateFlush.reason.message : String(stateFlush.reason)
+      )
+    }
+  }).finally(() => {
     readyToQuit = true
     app.quit()
   })

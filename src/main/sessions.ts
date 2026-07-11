@@ -51,14 +51,17 @@ function isEntry(value: unknown): value is SessionEntry {
     (value.parentId === null || typeof value.parentId === 'string')
 }
 
-function parseDocument(content: string): SessionDocument {
+function parseDocument(content: string, source: string): SessionDocument {
   const values: unknown[] = []
-  for (const line of content.split('\n')) {
+  const lines = content.split('\n')
+  for (const [index, line] of lines.entries()) {
     if (!line.trim()) continue
     try {
       values.push(JSON.parse(line))
-    } catch {
-      // Pi tolerates a partial final JSONL record after an interrupted write.
+    } catch (error) {
+      const partialFinalRecord = index === lines.length - 1 && !content.endsWith('\n')
+      if (partialFinalRecord) continue
+      throw new Error(`Invalid Pi session record in ${source} at line ${index + 1}`, { cause: error })
     }
   }
   if (!isHeader(values[0])) throw new Error('Invalid Pi session header')
@@ -191,7 +194,7 @@ export function recoveredThreadId(sessionFile: string): string {
 export async function readSessionTree(
   sessionFile: string
 ): Promise<{ tree: SessionTreeNode[]; leafId: string | null }> {
-  const document = parseDocument(await readFile(sessionFile, 'utf8'))
+  const document = parseDocument(await readFile(sessionFile, 'utf8'), sessionFile)
   const nodes = new Map<string, SessionTreeNode>()
   const order = new Map<string, number>()
   const labels = new Map<string, { label?: string; timestamp?: string }>()
@@ -249,7 +252,7 @@ export async function cloneSessionBranch(
   env: Record<string, string>,
   rewindSelectedUser = false
 ): Promise<string> {
-  const document = parseDocument(await readFile(sourceFile, 'utf8'))
+  const document = parseDocument(await readFile(sourceFile, 'utf8'), sourceFile)
   const byId = new Map(document.entries.map((entry) => [entry.id, entry]))
   const selectedEntry = byId.get(entryId)
   if (!selectedEntry) throw new Error('The selected history entry no longer exists')
@@ -286,7 +289,7 @@ export async function cloneSessionBranch(
 }
 
 export async function readSessionMessages(sessionFile: string): Promise<AgentMessage[]> {
-  const document = parseDocument(await readFile(sessionFile, 'utf8'))
+  const document = parseDocument(await readFile(sessionFile, 'utf8'), sessionFile)
   return document.entries
     .filter((entry) => entry.type === 'message' && entry.message !== undefined)
     .map((entry) => entry.message as AgentMessage)

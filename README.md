@@ -1,5 +1,8 @@
 # CodePi
 
+[![CI](https://github.com/jianghuawang/CodePi/actions/workflows/ci.yml/badge.svg)](https://github.com/jianghuawang/CodePi/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 CodePi is a macOS-first desktop command center for the [Pi coding agent](https://github.com/earendil-works/pi). It runs one Pi RPC subprocess per open thread, keeps multiple agents active in parallel, renders their streamed work as a native-feeling conversation, and adds Git review, project context, usage visibility, and everyday thread organization.
 
 ![CodePi desktop app](docs/codepi_screenshot.png)
@@ -15,10 +18,22 @@ CodePi is a macOS-first desktop command center for the [Pi coding agent](https:/
 - Daily thread management: rename, pin, archive, mark read or unread, tag, duplicate, search, export, move to Trash, restore, and permanently delete.
 - The existing Codex-style Git changes view, isolated worktrees, session-tree history, and branch-from-history workflow.
 
+## Install status
+
+The latest [GitHub release](https://github.com/jianghuawang/CodePi/releases)
+is a development preview. Its DMG is not yet notarized by Apple, so Gatekeeper
+will normally block the first launch. If you trust the downloaded artifact,
+try to open CodePi once and then allow it from **System Settings → Privacy &
+Security → Open Anyway**. Do not disable Gatekeeper globally.
+
+For the lowest-friction development setup, build CodePi from source using the
+steps below. A Developer ID-signed and notarized general release is planned;
+maintainers should follow the [release checklist](docs/RELEASING.md).
+
 ## Prerequisites
 
-- macOS on Apple silicon
-- Node.js 22.12 or newer
+- macOS 12 or newer on Apple silicon
+- Node.js 22.19 or newer
 - Xcode Command Line Tools, recommended and required if the native `node-pty` terminal dependency must compile locally
 - Git for changes and worktree features
 - Pi on `PATH`
@@ -55,12 +70,14 @@ npm run dist:mac
 
 The macOS target is currently `arm64` only. `electron-builder` automatically uses an available signing identity; without one it can still create an unsigned local build. Hardened runtime is enabled. Notarization credentials and release automation are not stored in this repository.
 
-Run the tests or type-check separately:
+Run every contributor check with one command:
 
 ```bash
-npm test
-npm run typecheck
+npm run check
 ```
+
+The individual `lint`, `typecheck`, `test`, and `build` scripts remain
+available when iterating on one area.
 
 The production archive keeps `node-pty` unpacked from ASAR because it contains a native binary. Re-run `npm install` after changing Electron versions or switching CPU architecture so that native dependencies are rebuilt for the target runtime.
 
@@ -244,4 +261,6 @@ The integration follows Pi's upstream documentation:
 ## Contributing and license
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and pull request
-guidelines. CodePi is released under the [MIT License](LICENSE).
+guidelines, [SECURITY.md](SECURITY.md) for private vulnerability reporting,
+and [SUPPORT.md](SUPPORT.md) for help. Releases are documented in
+[CHANGELOG.md](CHANGELOG.md). CodePi is released under the [MIT License](LICENSE).

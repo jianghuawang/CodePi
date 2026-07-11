@@ -16,10 +16,10 @@ function formatRelative(timestamp: number, now: number): string {
 }
 
 export function useRelativeTime(timestamp: number): string {
-  const [, setTick] = useState(0)
+  const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    const timer = window.setInterval(() => setTick((value) => value + 1), 30_000)
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000)
     return () => window.clearInterval(timer)
   }, [])
-  return useMemo(() => formatRelative(timestamp, Date.now()), [timestamp, Math.floor(Date.now() / 30_000)])
+  return useMemo(() => formatRelative(timestamp, now), [now, timestamp])
 }

@@ -11,7 +11,6 @@ import type {
   PiCapability,
   PromptTemplate,
   ProjectRecord,
-  SessionState,
   ThinkingLevel,
   ThreadEvent,
   ThreadRecord,
@@ -28,6 +27,7 @@ import { ThreadHeader, type ThreadTab } from './components/ThreadHeader'
 import { Transcript } from './components/Transcript'
 import { WorkspaceDock, type WorkspaceDockTab } from './components/WorkspaceDock'
 import { useTheme } from './hooks/useTheme'
+import { appendMessage, markOptimisticUserMessage } from './runtime-messages'
 import type { LiveSegment, LiveToolSegment, LiveTurn } from './ui-types'
 
 interface ThreadRuntime extends OpenThreadResult {
@@ -42,57 +42,7 @@ interface DockState {
   tab: WorkspaceDockTab
 }
 
-const optimisticUserMessages = new WeakSet<object>()
-
-function fallbackState(threadId: string): SessionState {
-  return {
-    model: null,
-    thinkingLevel: 'off',
-    isStreaming: false,
-    isCompacting: false,
-    steeringMode: 'one-at-a-time',
-    followUpMode: 'one-at-a-time',
-    sessionId: threadId,
-    messageCount: 0,
-    pendingMessageCount: 0,
-  }
-}
-
-function messageText(message: AgentMessage): string {
-  if (message.role !== 'user') return ''
-  return typeof message.content === 'string'
-    ? message.content
-    : message.content.filter((item) => item.type === 'text').map((item) => item.type === 'text' ? item.text : '').join('\n')
-}
-
-function appendMessage(messages: AgentMessage[], message: AgentMessage): AgentMessage[] {
-  if (message.role === 'user') {
-    const authoritativeText = messageText(message)
-    const optimisticIndex = messages.findIndex((candidate) => {
-      if (candidate.role !== 'user' || !optimisticUserMessages.has(candidate)) return false
-      const draft = messageText(candidate)
-      return Math.abs(candidate.timestamp - message.timestamp) < 5 * 60_000 &&
-        (authoritativeText === draft ||
-          authoritativeText.startsWith(`${draft}\n\nAttached`) ||
-          authoritativeText.startsWith(`${draft}\n\n📎`))
-    })
-    if (optimisticIndex >= 0) {
-      optimisticUserMessages.delete(messages[optimisticIndex])
-      const next = [...messages]
-      next[optimisticIndex] = message
-      return next
-    }
-  }
-  const duplicate = messages.some((candidate) => {
-    if (candidate.role !== message.role) return false
-    if (candidate.role === 'toolResult' && message.role === 'toolResult') return candidate.toolCallId === message.toolCallId
-    if (candidate.role === 'user' && message.role === 'user') {
-      return messageText(candidate) === messageText(message) && Math.abs(candidate.timestamp - message.timestamp) < 8_000
-    }
-    return candidate.timestamp === message.timestamp
-  })
-  return duplicate ? messages : [...messages, message]
-}
+const closedDockState: DockState = { open: false, tab: 'files' }
 
 function findToolIndex(segments: Record<number, LiveSegment>, toolCallId?: string, preferred?: number): number {
   if (preferred != null) return preferred
@@ -355,9 +305,9 @@ export function App(): React.JSX.Element {
   const newThreadProject = projects.find((project) => project.id === newThreadProjectId)
   const selectedTab = selectedThreadId ? tabByThread[selectedThreadId] ?? 'transcript' : 'transcript'
   const selectedDock = selectedThreadId
-    ? dockByThread[selectedThreadId] ?? { open: false, tab: 'files' as const }
+    ? dockByThread[selectedThreadId] ?? closedDockState
     : undefined
-  const terminalMounted = selectedThreadId ? selectedThreadId in terminalByThread : false
+  const terminalThreadIds = useMemo(() => Object.keys(terminalByThread), [terminalByThread])
   const terminalOpen = selectedThreadId ? terminalByThread[selectedThreadId] ?? false : false
 
   const toggleTerminal = useCallback((threadId: string) => {
@@ -377,8 +327,10 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || selectedThread?.status !== 'running') return
+      if (event.defaultPrevented || document.querySelector('[role="dialog"], [role="menu"]')) return
+      if (event.target instanceof Element && event.target.matches('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return
       event.preventDefault()
-      void window.codePi.abortThread(selectedThread.id)
+      void window.codePi.abortThread(selectedThread.id).catch(() => undefined)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -390,6 +342,14 @@ export function App(): React.JSX.Element {
   ): Promise<ThreadRecord> => {
     const updated = await window.codePi.updateThread(thread.id, update)
     setThreads((current) => current.map((item) => item.id === updated.id ? updated : item))
+    if (updated.archived) {
+      setTerminalByThread((current) => {
+        if (!(updated.id in current)) return current
+        const next = { ...current }
+        delete next[updated.id]
+        return next
+      })
+    }
     if (updated.archived && selectedThreadId === updated.id) {
       setSelectedThreadId(undefined)
       await window.codePi.selectThread(undefined)
@@ -480,7 +440,7 @@ export function App(): React.JSX.Element {
         <div className="no-thread-view">
           <div className="empty-project-art"><span>π</span></div>
           <h1>Start a thread</h1>
-          <p>Give Pi an isolated workspace and let it work while you move on to another task.</p>
+          <p>Choose a project, hand Pi a task, and keep working while it runs.</p>
           <div className="empty-actions">
             <button className="button button-primary" onClick={() => void beginNewThread()}><Plus size={14} /> New thread</button>
             {projects.length === 0 && <button className="button button-secondary" onClick={() => void addProject()}><FolderPlus size={14} /> Add project</button>}
@@ -511,6 +471,7 @@ export function App(): React.JSX.Element {
     return (
       <div className="thread-view">
         <ThreadHeader
+          key={selectedThread.id}
           thread={selectedThread}
           tree={runtime.tree}
           isGit={Boolean(selectedProject?.isGit)}
@@ -572,7 +533,13 @@ export function App(): React.JSX.Element {
                 </div>
               )}
             </div>
-            <Transcript messages={runtime.messages} live={runtime.live} theme={theme} running={selectedThread.status === 'running'} />
+            <Transcript
+              key={selectedThread.id}
+              messages={runtime.messages}
+              live={runtime.live}
+              theme={theme}
+              running={selectedThread.status === 'running'}
+            />
             {selectedThread.archived ? (
               <div className="archived-thread-notice">
                 <span>This thread is archived and read-only.</span>
@@ -581,6 +548,7 @@ export function App(): React.JSX.Element {
                 </button>
               </div>
             ) : <Composer
+              key={selectedThread.id}
               threadId={selectedThread.id}
               cwd={selectedThread.cwd}
               status={selectedThread.status}
@@ -637,7 +605,7 @@ export function App(): React.JSX.Element {
                   ? { ...thread, updatedAt: message.timestamp }
                   : thread))
                 if (optimistic) {
-                  optimisticUserMessages.add(message)
+                  markOptimisticUserMessage(message)
                   setRuntimes((current) => ({ ...current, [selectedThread.id]: { ...current[selectedThread.id], messages: appendMessage(current[selectedThread.id].messages, message) } }))
                 } else {
                   setRuntimes((current) => ({ ...current, [selectedThread.id]: { ...current[selectedThread.id], queuedCount: current[selectedThread.id].queuedCount + 1 } }))
@@ -655,16 +623,12 @@ export function App(): React.JSX.Element {
           </div>
         ) : (
           <ChangesView
+            key={selectedThread.id}
             thread={selectedThread}
             theme={theme}
             onOpenEditor={() => void window.codePi.openInEditor(selectedThread.id)}
             onApplyToMain={() => window.codePi.applyToMain(selectedThread.id)}
           />
-        )}
-        {terminalMounted && (
-          <div className="thread-terminal-drawer" hidden={!terminalOpen}>
-            <TerminalPane key={selectedThread.id} threadId={selectedThread.id} theme={theme} active={terminalOpen} />
-          </div>
         )}
       </div>
     )
@@ -678,13 +642,14 @@ export function App(): React.JSX.Element {
     projects.length,
     runtime,
     selectedDock,
+    selectedProject?.isGit,
     selectedTab,
     selectedThread,
     templates,
-    terminalMounted,
     terminalOpen,
     theme,
     toggleTerminal,
+    updateManagedThread,
   ])
 
   if (!bootstrap && !fatalError) return <div className="app-loading"><div className="pi-loader">π</div><span>Starting CodePi…</span></div>
@@ -732,9 +697,25 @@ export function App(): React.JSX.Element {
         onOpenSettings={() => void window.codePi.openSettings()}
       />
       <main className={`main-pane ${selectedDock?.open ? 'has-workspace-dock' : ''}`}>
-        <div className="main-content">{shell}</div>
+        <div className="main-content">
+          {shell}
+          {terminalThreadIds.length > 0 && (
+            <div className="thread-terminal-drawer" hidden={!selectedThread || !terminalOpen}>
+              {terminalThreadIds.map((threadId) => (
+                <div className="thread-terminal-session" key={threadId} hidden={threadId !== selectedThread?.id}>
+                  <TerminalPane
+                    threadId={threadId}
+                    theme={theme}
+                    active={threadId === selectedThread?.id && terminalOpen}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
         {selectedThread && selectedDock?.open && (
           <WorkspaceDock
+            key={selectedThread.id}
             threadId={selectedThread.id}
             activeTab={selectedDock.tab}
             onTabChange={(tab) => setDockByThread((current) => ({

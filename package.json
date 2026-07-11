@@ -5,14 +5,35 @@
   "description": "A macOS-first desktop command center for the Pi coding agent",
   "license": "MIT",
   "author": "CodePi Contributors",
+  "homepage": "https://github.com/jianghuawang/CodePi#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jianghuawang/CodePi.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jianghuawang/CodePi/issues"
+  },
+  "keywords": [
+    "coding-agent",
+    "electron",
+    "macos",
+    "pi",
+    "react"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "npm@11.12.1",
   "main": "out/main/index.js",
   "scripts": {
     "postinstall": "node node_modules/electron/install.js && electron-builder install-app-deps",
     "dev": "electron-vite dev",
+    "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "npm run typecheck && electron-vite build",
+    "check": "npm run lint && npm test && npm run build",
     "dist:mac": "npm run build && electron-builder --mac --arm64"
   },
   "dependencies": {
@@ -29,6 +50,7 @@
     "shiki": "4.3.1"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "24.10.1",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
@@ -36,7 +58,10 @@
     "electron": "43.1.0",
     "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",
+    "eslint": "^10.7.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "typescript": "6.0.3",
+    "typescript-eslint": "^8.63.0",
     "vite": "7.3.6",
     "vitest": "4.1.10"
   },
@@ -49,6 +74,7 @@
     ],
     "files": [
       "out/**/*",
+      "LICENSE",
       "package.json"
     ],
     "directories": {
@@ -57,6 +83,7 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "build/icon.png",
+      "minimumSystemVersion": "12.0.0",
       "target": [
         {
           "target": "dir",

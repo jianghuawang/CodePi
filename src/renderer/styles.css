@@ -482,6 +482,17 @@ select:focus-visible {
   display: none;
 }
 
+.thread-terminal-session {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.thread-terminal-session[hidden] {
+  display: none;
+}
+
 .thread-header {
   position: relative;
   z-index: 10;
@@ -799,7 +810,7 @@ select:focus-visible {
   padding: 16px clamp(24px, 5vw, 58px) 14px;
 }
 
-.message:first-child {
+.virtual-row[data-index='0'] > .message {
   padding-top: 26px;
 }
 
@@ -820,6 +831,7 @@ select:focus-visible {
 
 .message-user .message-label {
   width: min(82%, 660px);
+  text-align: right;
 }
 
 .user-bubble {
@@ -2408,6 +2420,8 @@ select:focus-visible {
 .main-content {
   position: relative;
   z-index: 1;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   height: 100%;

@@ -110,9 +110,11 @@ export function Composer({
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState<string>()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const suggestionRequest = useRef(0)
   const running = status === 'running'
   const currentModel = model ? `${model.provider}::${model.id}` : ''
   const fileToken = tokenMatch(value, '@')
+  const fileQuery = fileToken?.[1]
   const commandToken = tokenMatch(value, '/')
   const commandSuggestions = useMemo(() => {
     if (!commandToken) return []
@@ -129,19 +131,23 @@ export function Composer({
 
   useEffect(resize, [value])
   useEffect(() => {
-    if (!fileToken) {
+    const requestId = ++suggestionRequest.current
+    if (fileQuery === undefined) {
       setFileSuggestions([])
       return
     }
-    const query = fileToken[1] ?? ''
     const timer = window.setTimeout(() => {
-      const request = query
-        ? window.codePi.searchProjectFiles(threadId, query, 8)
+      const request = fileQuery
+        ? window.codePi.searchProjectFiles(threadId, fileQuery, 8)
         : window.codePi.getRecentFiles(threadId)
-      void request.then((files) => setFileSuggestions(files.slice(0, 8))).catch(() => setFileSuggestions([]))
+      void request.then((files) => {
+        if (requestId === suggestionRequest.current) setFileSuggestions(files.slice(0, 8))
+      }).catch(() => {
+        if (requestId === suggestionRequest.current) setFileSuggestions([])
+      })
     }, 100)
     return () => window.clearTimeout(timer)
-  }, [threadId, value])
+  }, [fileQuery, threadId])
 
   const addAttachments = async (next: ComposerAttachment[]) => {
     setError(undefined)

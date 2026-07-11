@@ -265,7 +265,9 @@ export class StateStore {
     if (this.saveTimer) clearTimeout(this.saveTimer)
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined
-      void this.enqueueWrite()
+      void this.enqueueWrite().catch((error: unknown) => {
+        console.error('CodePi could not save application state', error)
+      })
     }, 180)
   }
 

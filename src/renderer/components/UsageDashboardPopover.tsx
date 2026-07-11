@@ -8,7 +8,7 @@ import {
   TimerReset,
   Zap
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   SessionState,
   SessionStats,
@@ -77,7 +77,7 @@ export function UsageDashboardPopover({
   useEffect(() => setCurrentState(state), [state])
   useEffect(() => setCurrentStats(stats), [stats])
 
-  const loadDashboard = async () => {
+  const loadDashboard = useCallback(async () => {
     setLoading(true)
     setError(undefined)
     try {
@@ -87,11 +87,11 @@ export function UsageDashboardPopover({
     } finally {
       setLoading(false)
     }
-  }
+  }, [projectId])
 
   useEffect(() => {
     void loadDashboard()
-  }, [projectId])
+  }, [loadDashboard])
 
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
