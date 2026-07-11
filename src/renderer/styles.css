@@ -4181,13 +4181,18 @@ select:focus-visible {
 .workspace-terminal-host {
   min-width: 0;
   min-height: 0;
+  padding: 9px 7px;
   overflow: hidden;
   background: var(--surface);
 }
 
 .workspace-terminal-host .xterm {
   height: 100%;
-  padding: 9px 7px;
+  background: var(--surface);
+}
+
+.workspace-terminal-host .xterm-viewport {
+  background-color: var(--surface) !important;
 }
 
 .workspace-terminal-host .xterm-viewport,

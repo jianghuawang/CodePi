@@ -12,15 +12,19 @@ export interface TerminalPaneProps {
 }
 
 function terminalTheme(theme: 'light' | 'dark'): ITheme {
+  const token = (name: string, fallback: string): string =>
+    getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+  const background = token('--surface', theme === 'dark' ? '#262628' : '#ffffff')
+
   return theme === 'dark'
     ? {
-        background: '#18181a',
-        foreground: '#e7e7e9',
-        cursor: '#5aa7ff',
-        cursorAccent: '#18181a',
-        selectionBackground: '#355b8659',
+        background,
+        foreground: token('--text', '#f5f5f7'),
+        cursor: token('--accent', '#3d9bff'),
+        cursorAccent: background,
+        selectionBackground: token('--accent-soft', 'rgba(61, 155, 255, 0.16)'),
         black: '#242428',
-        brightBlack: '#72727a',
+        brightBlack: token('--text-tertiary', '#77777d'),
         red: '#ff6b6b',
         green: '#75c98d',
         yellow: '#e6bd68',
@@ -30,13 +34,13 @@ function terminalTheme(theme: 'light' | 'dark'): ITheme {
         white: '#e7e7e9',
       }
     : {
-        background: '#ffffff',
-        foreground: '#26262a',
-        cursor: '#1677d2',
-        cursorAccent: '#ffffff',
-        selectionBackground: '#1677d22b',
+        background,
+        foreground: token('--text', '#1d1d1f'),
+        cursor: token('--accent', '#0a6ee8'),
+        cursorAccent: background,
+        selectionBackground: token('--accent-soft', 'rgba(10, 110, 232, 0.11)'),
         black: '#323237',
-        brightBlack: '#77777e',
+        brightBlack: token('--text-tertiary', '#96969b'),
         red: '#c83f49',
         green: '#35844d',
         yellow: '#9a6818',

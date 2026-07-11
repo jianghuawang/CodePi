@@ -2,7 +2,9 @@
 
 CodePi is a macOS-first desktop command center for the [Pi coding agent](https://github.com/earendil-works/pi). It runs one Pi RPC subprocess per open thread, keeps multiple agents active in parallel, renders their streamed work as a native-feeling conversation, and adds Git review, project context, usage visibility, and everyday thread organization.
 
-> CodePi is currently a macOS-only MVP. Platform checks and process-launch details are isolated so Windows and Linux support can be added later without changing the renderer contract.
+![CodePi desktop app](docs/codepi_screenshot.png)
+
+> CodePi is currently macOS-only. Platform checks and process-launch details are isolated so Windows and Linux support can be added later without changing the renderer contract.
 
 ## What is included
 
@@ -66,7 +68,7 @@ The production archive keeps `node-pty` unpacked from ASAR because it contains a
 
 1. Add a project with the folder button or **File → New Project** (`⇧⌘N`).
 2. Create a thread with the plus button or **File → New Thread** (`⌘N`).
-3. For Git projects, leave **Run in isolated worktree** enabled to work on a dedicated `pi/<thread-id>` branch under `.pi-gui/worktrees/`.
+3. New threads use the project's current branch by default. For Git projects, enable **Run in isolated worktree** to work on a dedicated `pi/<thread-id>` branch under `.pi-gui/worktrees/`.
 4. Choose the active model and thinking level beneath the message field.
 5. Add context, send a prompt, and continue working in another thread while Pi runs.
 6. Use **Changes** for Git review and the workspace button in the thread header for Files, Terminal, or Preview.

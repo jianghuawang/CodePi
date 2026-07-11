@@ -10,7 +10,7 @@ interface NewThreadSheetProps {
 
 export function NewThreadSheet({ project, onClose, onCreate }: NewThreadSheetProps): React.JSX.Element {
   const [title, setTitle] = useState('')
-  const [isolated, setIsolated] = useState(project.isGit)
+  const [isolated, setIsolated] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string>()
   const inputRef = useRef<HTMLInputElement>(null)
