@@ -24,18 +24,22 @@ Sizes are relative (S < M < L). Each phase ends with its checklist rows green pl
 listed acceptance gate. Phases 3–5 are largely independent of each other and can be
 reordered or parallelized if useful.
 
-> **Status (2026-07-12):** Phases 0–4 implemented. Phases 1–2 gate-checked
-> against a copy of real app data (sidebar/library round-trip, real Pi spawn,
-> transcript/model/stats via the bridge; streaming verified by the fake-pi
-> suite). Phase 3 (diff parsing, stage/commit/push, worktree
-> create/copy/apply/remove with safety checks) and Phase 4 (openpty +
-> posix_spawn PTY with SETSID controlling terminal, coalesced output, SIGHUP →
-> SIGKILL close) are covered by real-git fixture tests and live-shell PTY
-> tests. Remaining deferrals: capability discovery (Pi runs with default
-> extension/skill discovery; toggles list empty), and the Phase 5 channels
-> (`exportThread`, workspace files, preview, transcript-tier search). The
-> in-app click-through of the Changes tab and terminal pane is still owed as a
-> manual gate check.
+> **Status (2026-07-12):** Phases 0–5 implemented, including the full
+> capability-discovery port (auto directories, settings patterns/globs,
+> `pi list` packages, per-thread toggles feeding `--extension`/`--skill` spawn
+> args), workspace files/search, transcript-tier thread search, Markdown/HTML
+> exports, and the loopback-only preview overlay. Phases 1–2 were gate-checked
+> against a copy of real app data; Phases 3–5 are covered by real-git fixture
+> tests, live-shell PTY tests, and service-level unit tests (60 XCTest cases +
+> the Vitest suite).
+>
+> **Owed before cutover (Phase 6):** an interactive parity click-through of
+> Changes/terminal/preview/export in the running shell (scripted clicks were
+> abandoned because the user was at the machine); native drag-and-drop file
+> paths (§7.4 — needs a small renderer accommodation, DOM drop currently
+> yields data without paths under WKWebView); Developer ID signing +
+> notarization (credentials required); and the release cutover itself
+> (bundle-id switch, README/RELEASING updates, Electron retirement).
 
 ### Phase 0 — Shell spike (M)
 

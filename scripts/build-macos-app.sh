@@ -17,11 +17,26 @@ fi
 (cd "$ROOT/macos" && swift build -c "$CONFIGURATION")
 BINARY="$ROOT/macos/.build/$CONFIGURATION/CodePi"
 
+# Convert the shared 1024px app icon into an .icns (cached until the source changes).
+ICNS="$ROOT/macos/.build/AppIcon.icns"
+if [[ ! -f "$ICNS" || "$ROOT/build/icon.png" -nt "$ICNS" ]]; then
+  ICONSET="$(mktemp -d)/AppIcon.iconset"
+  mkdir -p "$ICONSET"
+  for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$ROOT/build/icon.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+    double=$((size * 2))
+    sips -z "$double" "$double" "$ROOT/build/icon.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$ICONSET" -o "$ICNS"
+  rm -rf "$(dirname "$ICONSET")"
+fi
+
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BINARY" "$APP_DIR/Contents/MacOS/CodePi"
 cp -R "$ROOT/out/web" "$APP_DIR/Contents/Resources/web"
 cp "$ROOT/out/bridge/codepi-shim.js" "$APP_DIR/Contents/Resources/codepi-shim.js"
+cp "$ICNS" "$APP_DIR/Contents/Resources/AppIcon.icns"
 
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -38,6 +53,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <string>CodePi</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>
   <string>0.3.0</string>
   <key>CFBundleVersion</key>

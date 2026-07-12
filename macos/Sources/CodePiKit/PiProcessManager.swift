@@ -10,6 +10,9 @@ public final class PiProcessManager {
   private var clients: [String: PiRpcClient] = [:]
   private var opening: [String: (token: UUID, task: Task<JSONValue, Error>)] = [:]
 
+  /// Supplies extra spawn args per thread (capability opt-in flags).
+  public var spawnArgsProvider: (@MainActor (ThreadRecord, AppSettings) async -> [String])?
+
   public init(store: StateStore, emit: @escaping (JSONValue) -> Void) {
     self.store = store
     self.emit = emit
@@ -81,16 +84,15 @@ public final class PiProcessManager {
     var client = clients[threadId]
     if client == nil {
       let settings = store.snapshot().settings
+      let extraArgs = await spawnArgsProvider?(thread, settings) ?? []
       let created = PiRpcClient(options: PiRpcClientOptions(
         piPath: settings.piPath,
         cwd: thread.cwd,
         env: PiEnvironment.environmentForPi(settings.env),
         session: thread.sessionFile,
         model: thread.sessionFile == nil && !settings.defaultModel.isEmpty ? settings.defaultModel : nil,
-        requestTimeout: 30
-        // NOTE: capability spawn args (--no-extensions/--no-skills + enabled
-        // paths) arrive with the capability-discovery port; until then Pi uses
-        // its default discovery.
+        requestTimeout: 30,
+        extraArgs: extraArgs
       ))
       attach(threadId: threadId, client: created)
       clients[threadId] = created
@@ -230,6 +232,10 @@ public final class PiProcessManager {
   public func setSessionName(_ threadId: String, name: String) async {
     guard let client = clients[threadId] else { return }
     try? await client.setSessionName(name)
+  }
+
+  public func messages(_ threadId: String) async throws -> JSONValue {
+    try await ensureClient(threadId).getMessages()
   }
 
   public func history(_ threadId: String) async throws -> JSONValue {

@@ -11,6 +11,9 @@ final class Backend {
   let store: StateStore
   let processes: PiProcessManager
   let terminals: PtyService
+  let workspace = WorkspaceService()
+  let transcriptSearch = TranscriptSearch()
+  let preview: PreviewController
   private let events: EventDispatcher
   private var sessionsRecovered = false
   private weak var mainWindow: NSWindow?
@@ -25,6 +28,12 @@ final class Backend {
     }
     self.terminals = PtyService { [events] payload in
       events.emit(channel: BridgeChannels.terminalEvent, payload: payload)
+    }
+    self.preview = PreviewController(hostView: mainWindow?.contentView) { [events] payload in
+      events.emit(channel: BridgeChannels.previewEvent, payload: payload)
+    }
+    self.processes.spawnArgsProvider = { thread, settings in
+      await CapabilityDiscovery.buildSpawnArgs(thread: thread, settings: settings)
     }
   }
 
@@ -49,6 +58,8 @@ final class Backend {
         let thread = try store.thread(threadId)
         if thread.deletedAt != nil { throw BridgeError("Restore this thread before opening it") }
       }
+      let previous = store.snapshot().selectedThreadId
+      if let previous, previous != threadId { preview.close(threadId: previous) }
       store.update { state in
         state.selectedThreadId = threadId
         if let threadId, let index = state.threads.firstIndex(where: { $0.id == threadId }) {
@@ -65,6 +76,7 @@ final class Backend {
       _ = try store.thread(threadId)
       await processes.close(threadId)
       await terminals.closeThread(threadId)
+      preview.close(threadId: threadId)
       _ = try ThreadLibrary.softTrashThread(store: store, threadId: threadId)
       return nil
     }
@@ -105,6 +117,7 @@ final class Backend {
       if updated.archived && !previous.archived {
         await processes.close(threadId)
         await terminals.closeThread(threadId)
+        preview.close(threadId: threadId)
         store.update { state in
           if state.selectedThreadId == threadId { state.selectedThreadId = nil }
         }
@@ -123,9 +136,18 @@ final class Backend {
       return try await processes.restart(threadId)
     }
     router.register(BridgeChannels.restartThreadWithoutCapabilities) { [self] args in
-      // Capability discovery is not ported yet; a plain restart is the
-      // closest safe behavior.
-      try await processes.restart(requireString(args, 0, "threadId"))
+      let threadId = try requireString(args, 0, "threadId")
+      let thread = try store.thread(threadId)
+      if thread.deletedAt != nil { throw BridgeError("Restore this thread before opening it") }
+      let capabilities = await CapabilityDiscovery.list(thread: thread, settings: store.snapshot().settings)
+      store.update { state in
+        guard let index = state.threads.firstIndex(where: { $0.id == threadId }) else { return }
+        state.threads[index].disabledCapabilityIds = CapabilityDiscovery.disabledIdsForSafeRestart(
+          existing: state.threads[index].disabledCapabilityIds,
+          capabilities: capabilities
+        )
+      }
+      return try await processes.restart(threadId)
     }
     router.register(BridgeChannels.sendMessage) { [self] args in
       let threadId = try requireString(args, 0, "threadId")
@@ -181,13 +203,28 @@ final class Backend {
       try await processes.history(requireString(args, 0, "threadId"))
     }
     router.register(BridgeChannels.getCapabilities) { [self] args in
-      _ = try store.thread(requireString(args, 0, "threadId"))
-      // Capability discovery ships in a later increment; Pi currently runs
-      // with its default extension/skill discovery.
-      return .array([])
+      let thread = try store.thread(requireString(args, 0, "threadId"))
+      return await CapabilityDiscovery.list(thread: thread, settings: store.snapshot().settings)
     }
-    router.register(BridgeChannels.setCapabilityEnabled) { _ in
-      throw BridgeError("Per-thread extensions and skills are not ported to the Swift shell yet")
+    router.register(BridgeChannels.setCapabilityEnabled) { [self] args in
+      let threadId = try requireString(args, 0, "threadId")
+      let thread = try store.thread(threadId)
+      if thread.status == "running" || thread.status == "waiting" {
+        throw BridgeError("Stop the active turn before changing extensions or skills")
+      }
+      let capabilityId = try requireString(args, 1, "capabilityId")
+      let enabled = try requireBool(args, 2, "enabled")
+      let capabilities = await CapabilityDiscovery.list(thread: thread, settings: store.snapshot().settings)
+      guard (capabilities.arrayValue ?? []).contains(where: { $0.objectValue?["id"]?.stringValue == capabilityId }) else {
+        throw BridgeError("Capability not found")
+      }
+      store.update { state in
+        guard let index = state.threads.firstIndex(where: { $0.id == threadId }) else { return }
+        var disabled = Set(state.threads[index].disabledCapabilityIds)
+        if enabled { disabled.remove(capabilityId) } else { disabled.insert(capabilityId) }
+        state.threads[index].disabledCapabilityIds = Array(disabled)
+      }
+      return try await processes.restart(threadId)
     }
 
     router.register(BridgeChannels.listPromptTemplates) { [self] _ in
@@ -211,16 +248,74 @@ final class Backend {
       return ThreadLibrary.usageDashboard(entries: store.snapshot().usageLedger, projectId: projectId)
     }
     router.register(BridgeChannels.searchThreads) { [self] args in
-      searchThreadsMetadata(query: args.first?.stringValue ?? "")
+      let query = args.first?.stringValue ?? ""
+      guard !query.contains("\0"), query.count <= 512 else { throw BridgeError("search query is invalid") }
+      let snapshot = store.snapshot()
+      let projectNames = Dictionary(uniqueKeysWithValues: snapshot.projects.map { ($0.id, $0.name) })
+      return transcriptSearch.search(
+        query: query,
+        threads: snapshot.threads.filter { $0.deletedAt == nil },
+        projectNames: projectNames,
+        limit: 80
+      )
     }
     router.register(BridgeChannels.pickAttachments) { [self] args in
       _ = try store.thread(requireString(args, 0, "threadId"))
       return await pickAttachments()
     }
-    // Graceful degradation until the workspace service is ported: the
-    // composer's @-mention flows treat empty results as "nothing found".
-    router.register(BridgeChannels.searchProjectFiles) { _ in .array([]) }
-    router.register(BridgeChannels.getRecentFiles) { _ in .array([]) }
+    router.register(BridgeChannels.searchProjectFiles) { [self] args in
+      let threadId = try requireString(args, 0, "threadId")
+      let thread = try store.thread(threadId)
+      let query = args.count > 1 ? (args[1].stringValue ?? "") : ""
+      let limit = args.count > 2 ? Int(args[2].numberValue ?? 40) : 40
+      return try workspace.searchFiles(threadId: threadId, cwd: thread.cwd, query: query, limit: limit)
+    }
+    router.register(BridgeChannels.getRecentFiles) { [self] args in
+      let threadId = try requireString(args, 0, "threadId")
+      let thread = try store.thread(threadId)
+      return try workspace.recentFiles(threadId: threadId, cwd: thread.cwd)
+    }
+    router.register(BridgeChannels.listWorkspaceFiles) { [self] args in
+      let threadId = try requireString(args, 0, "threadId")
+      let thread = try store.thread(threadId)
+      return try workspace.listFiles(threadId: threadId, cwd: thread.cwd)
+    }
+    router.register(BridgeChannels.readWorkspaceFile) { [self] args in
+      let thread = try store.thread(requireString(args, 0, "threadId"))
+      let path = try requireRepoPath(args, 1)
+      return try workspace.readFile(cwd: thread.cwd, relativePath: path)
+    }
+    router.register(BridgeChannels.exportThread) { [self] args in
+      try await exportThread(
+        threadId: requireString(args, 0, "threadId"),
+        format: requireString(args, 1, "format")
+      )
+    }
+
+    // MARK: Preview (Phase 5)
+
+    router.register(BridgeChannels.openPreview) { [self] args in
+      let threadId = try requireString(args, 0, "threadId")
+      _ = try store.thread(threadId)
+      let url = try requireString(args, 1, "preview URL")
+      try preview.open(threadId: threadId, urlValue: url, bounds: args.count > 2 ? args[2] : .null)
+      return nil
+    }
+    router.register(BridgeChannels.setPreviewBounds) { [self] args in
+      try preview.setBounds(threadId: requireString(args, 0, "threadId"), bounds: args.count > 1 ? args[1] : .null)
+      return nil
+    }
+    router.register(BridgeChannels.previewAction) { [self] args in
+      try preview.action(
+        threadId: requireString(args, 0, "threadId"),
+        action: requireString(args, 1, "action")
+      )
+      return nil
+    }
+    router.register(BridgeChannels.closePreview) { [self] args in
+      preview.close(threadId: try requireString(args, 0, "threadId"))
+      return nil
+    }
 
     router.register(BridgeChannels.openSettings) { [self] _ in
       openSettingsWindow?()
@@ -608,6 +703,8 @@ final class Backend {
     guard response == .alertSecondButtonReturn else { throw BridgeError("Permanent deletion was cancelled") }
     await processes.close(threadId)
     await terminals.closeThread(threadId)
+    preview.close(threadId: threadId)
+    if let sessionFile = thread.sessionFile { transcriptSearch.clear(sessionFile: sessionFile) }
     if thread.worktree != nil {
       try await GitService.removeWorktree(projectPath: project.path, thread: thread)
     }
@@ -624,30 +721,46 @@ final class Backend {
     return nil
   }
 
-  private func searchThreadsMetadata(query: String) -> JSONValue {
-    let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
-    let snapshot = store.snapshot()
-    let projectNames = Dictionary(uniqueKeysWithValues: snapshot.projects.map { ($0.id, $0.name) })
-    let matches = snapshot.threads
-      .filter { $0.deletedAt == nil }
-      .filter { thread in
-        needle.isEmpty
-          || thread.title.lowercased().contains(needle)
-          || thread.cwd.lowercased().contains(needle)
-          || thread.tags.contains { $0.lowercased().contains(needle) }
-          || (projectNames[thread.projectId]?.lowercased().contains(needle) ?? false)
-      }
-      .sorted { $0.updatedAt > $1.updatedAt }
-      .prefix(80)
-    return .array(matches.map { thread in
-      .object([
-        "threadId": .string(thread.id),
-        "projectId": .string(thread.projectId),
-        "title": .string(thread.title),
-        "snippet": .string(projectNames[thread.projectId] ?? ""),
-        "timestamp": .number(thread.updatedAt)
-      ])
-    })
+  private func exportThread(threadId: String, format: String) async throws -> JSONValue {
+    guard format == "markdown" || format == "html" else { throw BridgeError("Export format is invalid") }
+    let thread = try store.thread(threadId)
+    let project = try store.project(thread.projectId)
+    let fileExtension = format == "markdown" ? "md" : "html"
+    var safeTitle = thread.title
+      .replacingOccurrences(of: "[^A-Za-z0-9._ -]+", with: "-", options: .regularExpression)
+      .trimmingCharacters(in: .whitespaces)
+    safeTitle = String(safeTitle.prefix(120))
+    if safeTitle.isEmpty { safeTitle = "CodePi-thread" }
+
+    let panel = NSSavePanel()
+    panel.title = "Export \(thread.title)"
+    panel.nameFieldStringValue = "\(safeTitle).\(fileExtension)"
+    let response: NSApplication.ModalResponse
+    if let mainWindow {
+      response = await panel.beginSheetModal(for: mainWindow)
+    } else {
+      response = panel.runModal()
+    }
+    guard response == .OK, let url = panel.url else { return .null }
+
+    // Prefer the raw session JSONL: bridge payloads are bounded (truncated
+    // tool output, stripped image data) and must never leak into an export.
+    let messages: [JSONValue]
+    if let sessionFile = thread.sessionFile {
+      messages = (try Sessions.readSessionMessages(sessionFile: sessionFile)).arrayValue ?? []
+    } else if processes.has(threadId) {
+      messages = (try await processes.messages(threadId)).arrayValue ?? []
+    } else {
+      messages = []
+    }
+    let path = try ExportService.export(
+      thread: thread,
+      messages: messages,
+      projectName: project.name,
+      format: format,
+      outputPath: url.path
+    )
+    return .object(["path": .string(path)])
   }
 
   private func pickAttachments() async -> JSONValue {
