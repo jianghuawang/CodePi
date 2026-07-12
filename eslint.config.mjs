@@ -4,7 +4,7 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import tseslint from 'typescript-eslint'
 
 export default defineConfig(
-  { ignores: ['node_modules/**', 'out/**', 'release/**', '.pi-gui/**', '.serena/**'] },
+  { ignores: ['node_modules/**', 'out/**', 'release/**', 'macos/**', '.pi-gui/**', '.serena/**'] },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {

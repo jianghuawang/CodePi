@@ -24,11 +24,19 @@ Sizes are relative (S < M < L). Each phase ends with its checklist rows green pl
 listed acceptance gate. Phases 3–5 are largely independent of each other and can be
 reordered or parallelized if useful.
 
+> **Status (2026-07-12):** Phase 0 complete. Phases 1 and 2 implemented and
+> gate-checked against a copy of real app data (sidebar/library round-trip, real
+> Pi spawn, transcript/model/stats via the bridge; streaming verified by the
+> fake-pi suite). Known deferrals, tracked for their owning phases: capability
+> discovery (Pi runs with default extension/skill discovery; toggles list empty),
+> worktree isolation falls back to the project checkout until Phase 3, and
+> `exportThread`/workspace/terminal/preview channels remain unregistered.
+
 ### Phase 0 — Shell spike (M)
 
 Scope: prove the architecture end to end with a walking skeleton.
 
-- `macos/` scaffold (XcodeGen, app + `CodePiKit` + tests targets), CI job.
+- `macos/` scaffold (SwiftPM package, app + `CodePiKit` + tests targets), CI job.
 - `npm run build:web` (plain Vite build of the existing renderer + shim compile).
 - `codepi://` scheme handler serving the web build; dev-server mode.
 - Bridge: envelope codec, router, `WKScriptMessageHandlerWithReply` round-trip, event

@@ -33,6 +33,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "npm run typecheck && electron-vite build",
+    "build:web": "vite build --config vite.web.config.ts && vite build --config vite.shim.config.ts",
     "check": "npm run lint && npm test && npm run build",
     "dist:mac": "npm run build && electron-builder --mac --arm64"
   },

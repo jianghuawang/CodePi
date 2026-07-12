@@ -239,16 +239,18 @@ Keychain migration is a listed follow-up, not part of the port.
 
 ## 9. Build, packaging, repo layout
 
-- `macos/` — XcodeGen `project.yml` (reviewable, no `.xcodeproj` churn), targets:
-  `CodePi` (app), `CodePiKit` (services library), `CodePiKitTests`.
-- Renderer: `npm run build:web` produces `out/web/` with plain Vite (the existing
-  renderer config minus Electron plumbing); the Xcode build copies it into
-  `CodePi.app/Contents/Resources/web/` as a build phase. The bridge shim compiles in the
-  same step.
-- Distribution: `xcodebuild archive` + Developer ID signing + `notarytool`; DMG via
-  `create-dmg`. Size target ≤ 25 MB (expected ~12–18 MB).
-- CI: existing `npm run check` unchanged; new job runs `xcodegen`, `xcodebuild test`,
-  and an archive smoke build on `macos-14`.
+- `macos/` — plain SwiftPM package (`Package.swift`; no Xcode project to churn),
+  targets: `CodePi` (app), `CodePiKit` (services library), `CodePiKitTests`.
+- Renderer: `npm run build:web` produces `out/web/` plus the compiled bridge shim
+  (`out/bridge/codepi-shim.js`) with plain Vite configs mirroring the electron-vite
+  renderer section.
+- App assembly: `scripts/build-macos-app.sh` builds the SwiftPM binary and assembles
+  `CodePi.app` (Info.plist, `Resources/web`, shim). An Xcode project is introduced only
+  if entitlement/signing needs ever outgrow `codesign` on the assembled bundle.
+- Distribution: Developer ID signing + `notarytool` on the assembled bundle; DMG via
+  `create-dmg`. Size target ≤ 25 MB (Phase 0 bundle measures ~2.4 MB).
+- CI: existing `npm run check` unchanged; a `swift-shell` job runs `swift build` and
+  `swift test` in `macos/`.
 - Deployment target: macOS 12 (unchanged; every API used is available on 12).
 
 ## 10. Testing strategy

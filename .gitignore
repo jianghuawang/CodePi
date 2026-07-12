@@ -5,3 +5,5 @@ release/
 *.log
 .pi-gui/
 .serena/
+macos/.build/
+macos/build/

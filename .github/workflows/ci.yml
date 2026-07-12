@@ -23,3 +23,14 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: npm run build:web
+
+  swift-shell:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build
+        working-directory: macos
+      - run: swift test
+        working-directory: macos
