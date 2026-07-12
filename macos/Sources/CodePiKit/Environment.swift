@@ -85,7 +85,13 @@ public enum ProcessRunner {
     public let stderr: String
   }
 
-  public static func run(command: [String], cwd: String? = nil, env: [String: String], timeout: TimeInterval) async -> Result {
+  public static func run(
+    command: [String],
+    cwd: String? = nil,
+    env: [String: String],
+    timeout: TimeInterval,
+    stdin: String? = nil
+  ) async -> Result {
     await withCheckedContinuation { continuation in
       let resume = OnceResumer(continuation)
       let process = Process()
@@ -97,7 +103,14 @@ public enum ProcessRunner {
       let stderr = Pipe()
       process.standardOutput = stdout
       process.standardError = stderr
-      process.standardInput = FileHandle.nullDevice
+      let stdinPipe: Pipe?
+      if stdin != nil {
+        stdinPipe = Pipe()
+        process.standardInput = stdinPipe
+      } else {
+        stdinPipe = nil
+        process.standardInput = FileHandle.nullDevice
+      }
       process.terminationHandler = { finished in
         let outData = stdout.fileHandleForReading.readDataToEndOfFile()
         let errData = stderr.fileHandleForReading.readDataToEndOfFile()
@@ -112,6 +125,12 @@ public enum ProcessRunner {
       } catch {
         resume.resume(Result(status: 127, stdout: "", stderr: error.localizedDescription))
         return
+      }
+      if let stdin, let stdinPipe {
+        DispatchQueue.global().async {
+          try? stdinPipe.fileHandleForWriting.write(contentsOf: Data(stdin.utf8))
+          try? stdinPipe.fileHandleForWriting.close()
+        }
       }
       DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
         if process.isRunning { process.terminate() }

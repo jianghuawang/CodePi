@@ -24,13 +24,18 @@ Sizes are relative (S < M < L). Each phase ends with its checklist rows green pl
 listed acceptance gate. Phases 3–5 are largely independent of each other and can be
 reordered or parallelized if useful.
 
-> **Status (2026-07-12):** Phase 0 complete. Phases 1 and 2 implemented and
-> gate-checked against a copy of real app data (sidebar/library round-trip, real
-> Pi spawn, transcript/model/stats via the bridge; streaming verified by the
-> fake-pi suite). Known deferrals, tracked for their owning phases: capability
-> discovery (Pi runs with default extension/skill discovery; toggles list empty),
-> worktree isolation falls back to the project checkout until Phase 3, and
-> `exportThread`/workspace/terminal/preview channels remain unregistered.
+> **Status (2026-07-12):** Phases 0–4 implemented. Phases 1–2 gate-checked
+> against a copy of real app data (sidebar/library round-trip, real Pi spawn,
+> transcript/model/stats via the bridge; streaming verified by the fake-pi
+> suite). Phase 3 (diff parsing, stage/commit/push, worktree
+> create/copy/apply/remove with safety checks) and Phase 4 (openpty +
+> posix_spawn PTY with SETSID controlling terminal, coalesced output, SIGHUP →
+> SIGKILL close) are covered by real-git fixture tests and live-shell PTY
+> tests. Remaining deferrals: capability discovery (Pi runs with default
+> extension/skill discovery; toggles list empty), and the Phase 5 channels
+> (`exportThread`, workspace files, preview, transcript-tier search). The
+> in-app click-through of the Changes tab and terminal pane is still owed as a
+> manual gate check.
 
 ### Phase 0 — Shell spike (M)
 

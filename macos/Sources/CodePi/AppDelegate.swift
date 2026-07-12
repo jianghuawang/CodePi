@@ -88,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     terminating = true
     Task { @MainActor in
       await backend?.processes.stopAll()
+      await backend?.terminals.stopAll()
       await store?.flush()
       NSApp.reply(toApplicationShouldTerminate: true)
     }

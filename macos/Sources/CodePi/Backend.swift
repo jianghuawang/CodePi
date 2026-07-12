@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 final class Backend {
   let store: StateStore
   let processes: PiProcessManager
+  let terminals: PtyService
   private let events: EventDispatcher
   private var sessionsRecovered = false
   private weak var mainWindow: NSWindow?
@@ -21,6 +22,9 @@ final class Backend {
     self.mainWindow = mainWindow
     self.processes = PiProcessManager(store: store) { [events] payload in
       events.emit(channel: BridgeChannels.threadEvent, payload: payload)
+    }
+    self.terminals = PtyService { [events] payload in
+      events.emit(channel: BridgeChannels.terminalEvent, payload: payload)
     }
   }
 
@@ -60,6 +64,7 @@ final class Backend {
       let threadId = try requireString(args, 0, "threadId")
       _ = try store.thread(threadId)
       await processes.close(threadId)
+      await terminals.closeThread(threadId)
       _ = try ThreadLibrary.softTrashThread(store: store, threadId: threadId)
       return nil
     }
@@ -99,6 +104,7 @@ final class Backend {
       }
       if updated.archived && !previous.archived {
         await processes.close(threadId)
+        await terminals.closeThread(threadId)
         store.update { state in
           if state.selectedThreadId == threadId { state.selectedThreadId = nil }
         }
@@ -220,6 +226,98 @@ final class Backend {
       openSettingsWindow?()
       return nil
     }
+
+    // MARK: Git and worktrees (Phase 3)
+
+    router.register(BridgeChannels.getChanges) { [self] args in
+      let thread = try store.thread(requireString(args, 0, "threadId"))
+      guard try store.project(thread.projectId).isGit else { return .array([]) }
+      return try await GitService.getChanges(thread: thread)
+    }
+    router.register(BridgeChannels.setFileStaged) { [self] args in
+      let thread = try store.thread(requireString(args, 0, "threadId"))
+      guard try store.project(thread.projectId).isGit else { return nil }
+      let requestedPath = try requireRepoPath(args, 1)
+      let staged = try requireBool(args, 2, "staged")
+      let files = try await GitService.getChanges(thread: thread).arrayValue ?? []
+      let selected = files.first { file in
+        let object = file.objectValue
+        let current = object?["to"]?.stringValue?.isEmpty == false
+          ? object?["to"]?.stringValue
+          : object?["from"]?.stringValue
+        return current == requestedPath
+      }
+      var paths = [requestedPath]
+      if let object = selected?.objectValue {
+        paths = [object["from"]?.stringValue, object["to"]?.stringValue]
+          .compactMap { $0 }
+          .filter { !$0.isEmpty }
+        if paths.isEmpty { paths = [requestedPath] }
+      }
+      try await GitService.setFileStaged(cwd: thread.cwd, files: paths, staged: staged)
+      return nil
+    }
+    router.register(BridgeChannels.commit) { [self] args in
+      guard let input = args.first?.objectValue,
+            let threadId = input["threadId"]?.stringValue,
+            let rawMessage = input["message"]?.stringValue,
+            let push = input["push"]?.boolValue else {
+        throw BridgeError("Commit input is invalid")
+      }
+      let message = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !message.isEmpty, message.count <= 20_000 else { throw BridgeError("Commit message is invalid") }
+      let thread = try store.thread(threadId)
+      guard try store.project(thread.projectId).isGit else { throw BridgeError("This project is not a Git repository") }
+      return try await GitService.commitChanges(thread: thread, message: message, push: push)
+    }
+    router.register(BridgeChannels.applyToMain) { [self] args in
+      let thread = try store.thread(requireString(args, 0, "threadId"))
+      let project = try store.project(thread.projectId)
+      try await GitService.applyWorktreeToMain(projectPath: project.path, thread: thread)
+      return nil
+    }
+    router.register(BridgeChannels.openInEditor) { [self] args in
+      let thread = try store.thread(requireString(args, 0, "threadId"))
+      let result = await ProcessRunner.run(
+        command: ["code", thread.cwd],
+        cwd: thread.cwd,
+        env: PiEnvironment.environmentForPi(store.snapshot().settings.env),
+        timeout: 15
+      )
+      if result.status != 0 {
+        NSWorkspace.shared.open(URL(fileURLWithPath: thread.cwd))
+      }
+      return nil
+    }
+
+    // MARK: Terminal (Phase 4)
+
+    router.register(BridgeChannels.openTerminal) { [self] args in
+      let threadId = try requireString(args, 0, "threadId")
+      let thread = try store.thread(threadId)
+      let columns = try requireInteger(args, 1, "columns")
+      let rows = try requireInteger(args, 2, "rows")
+      let terminalId = try terminals.open(threadId: threadId, cwd: thread.cwd, columns: columns, rows: rows)
+      return .object(["terminalId": .string(terminalId)])
+    }
+    router.register(BridgeChannels.writeTerminal) { [self] args in
+      let terminalId = try requireString(args, 0, "terminalId")
+      let data = args.count > 1 ? (args[1].stringValue ?? "") : ""
+      try terminals.write(terminalId: terminalId, data: data)
+      return nil
+    }
+    router.register(BridgeChannels.resizeTerminal) { [self] args in
+      try terminals.resize(
+        terminalId: requireString(args, 0, "terminalId"),
+        columns: requireInteger(args, 1, "columns"),
+        rows: requireInteger(args, 2, "rows")
+      )
+      return nil
+    }
+    router.register(BridgeChannels.closeTerminal) { [self] args in
+      await terminals.closeTerminal(try requireString(args, 0, "terminalId"))
+      return nil
+    }
   }
 
   func registerSettingsChannels(on router: BridgeRouter) {
@@ -338,50 +436,80 @@ final class Backend {
     let project = try store.project(projectId)
     let id = UUID().uuidString.lowercased()
     let now = nowMilliseconds()
-    let cwd = project.path
-    // Worktree isolation is a Phase 3 (git) feature of the Swift shell; an
-    // isolated request currently runs on the project checkout, like non-git
-    // projects do.
-    var sessionFile: String?
+    var cwd = project.path
+    var worktree: WorktreeRecord?
+    let isolated = record["isolated"]?.boolValue == true
+
+    var source: ThreadRecord?
     if let branch = record["branchFrom"]?.objectValue {
       guard let sourceThreadId = branch["sourceThreadId"]?.stringValue,
-            let entryId = branch["entryId"]?.stringValue else {
+            branch["entryId"]?.stringValue != nil else {
         throw BridgeError("Branch input is invalid")
       }
-      var source = try store.thread(sourceThreadId)
-      guard source.projectId == project.id else { throw BridgeError("History can only branch within its project") }
-      if source.sessionFile == nil {
-        _ = try await processes.open(source.id)
-        source = try store.thread(source.id)
-      }
-      guard let sourceFile = source.sessionFile else {
-        throw BridgeError("The source thread does not have a Pi session yet")
-      }
-      sessionFile = try Sessions.cloneSessionBranch(
-        sourceFile: sourceFile,
-        entryId: entryId,
-        targetCwd: cwd,
-        env: store.snapshot().settings.env,
-        rewindSelectedUser: true
+      source = try store.thread(sourceThreadId)
+      guard source?.projectId == project.id else { throw BridgeError("History can only branch within its project") }
+    }
+
+    let autoRetry = store.snapshot().threads.first?.autoRetryEnabled ?? true
+    func threadRecord(title: String, sessionFile: String?) -> ThreadRecord {
+      ThreadRecord(
+        id: id,
+        projectId: project.id,
+        title: title,
+        cwd: cwd,
+        createdAt: now,
+        updatedAt: now,
+        sessionFile: sessionFile,
+        worktree: worktree,
+        autoRetryEnabled: autoRetry
       )
     }
-    let sourceTitle = record["branchFrom"]?.objectValue?["sourceThreadId"]?.stringValue
-      .flatMap { id in try? store.thread(id).title }
+
+    var sessionFile: String?
+    do {
+      if isolated && project.isGit {
+        worktree = try await GitService.createWorktree(
+          projectPath: project.path,
+          threadId: id,
+          seed: source?.worktree != nil ? source : nil
+        )
+        cwd = worktree!.path
+        if let source, source.worktree != nil {
+          try await GitService.copyWorktreeState(source: source, target: threadRecord(title: "New thread", sessionFile: nil))
+        }
+      }
+      if record["branchFrom"]?.objectValue != nil {
+        var branchSource = source!
+        if branchSource.sessionFile == nil {
+          _ = try await processes.open(branchSource.id)
+          branchSource = try store.thread(branchSource.id)
+        }
+        guard let sourceFile = branchSource.sessionFile else {
+          throw BridgeError("The source thread does not have a Pi session yet")
+        }
+        sessionFile = try Sessions.cloneSessionBranch(
+          sourceFile: sourceFile,
+          entryId: record["branchFrom"]!.objectValue!["entryId"]!.stringValue!,
+          targetCwd: cwd,
+          env: store.snapshot().settings.env,
+          rewindSelectedUser: true
+        )
+      }
+    } catch {
+      if worktree != nil {
+        try? await GitService.removeWorktree(
+          projectPath: project.path,
+          thread: threadRecord(title: "New thread", sessionFile: nil)
+        )
+      }
+      throw error
+    }
+
     let rawTitle = record["title"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
     let title = rawTitle?.isEmpty == false
       ? rawTitle!
-      : sourceTitle.map { "Branch of \($0)" } ?? "New thread"
-    let autoRetry = store.snapshot().threads.first?.autoRetryEnabled ?? true
-    let thread = ThreadRecord(
-      id: id,
-      projectId: project.id,
-      title: title,
-      cwd: cwd,
-      createdAt: now,
-      updatedAt: now,
-      sessionFile: sessionFile,
-      autoRetryEnabled: autoRetry
-    )
+      : source.map { "Branch of \($0.title)" } ?? "New thread"
+    let thread = threadRecord(title: title, sessionFile: sessionFile)
     store.update { state in
       state.threads.insert(thread, at: 0)
       state.selectedThreadId = thread.id
@@ -392,36 +520,56 @@ final class Backend {
   private func duplicateThread(threadId: String) async throws -> JSONValue {
     let source = try store.thread(threadId)
     if source.deletedAt != nil { throw BridgeError("Restore this thread before duplicating it") }
-    if source.worktree != nil {
-      throw BridgeError("Duplicating isolated worktree threads arrives with the Git phase of the Swift shell")
-    }
     let project = try store.project(source.projectId)
-    var sessionFile: String?
-    if let sourceFile = source.sessionFile {
-      let history = try Sessions.readSessionTree(sessionFile: sourceFile)
-      if let leafId = history.leafId.stringValue {
-        sessionFile = try Sessions.cloneSessionBranch(
-          sourceFile: sourceFile,
-          entryId: leafId,
-          targetCwd: project.path,
-          env: store.snapshot().settings.env,
-          rewindSelectedUser: false
-        )
-      }
-    }
+    let id = UUID().uuidString.lowercased()
     let now = nowMilliseconds()
-    let thread = ThreadRecord(
-      id: UUID().uuidString.lowercased(),
-      projectId: source.projectId,
-      title: String("Copy of \(source.title)".prefix(240)),
-      cwd: project.path,
-      createdAt: now,
-      updatedAt: now,
-      sessionFile: sessionFile,
-      tags: source.tags,
-      disabledCapabilityIds: source.disabledCapabilityIds,
-      autoRetryEnabled: source.autoRetryEnabled
-    )
+    let title = String("Copy of \(source.title)".prefix(240))
+    var cwd = project.path
+    var worktree: WorktreeRecord?
+    var sessionFile: String?
+
+    func threadRecord(_ sessionFile: String?) -> ThreadRecord {
+      ThreadRecord(
+        id: id,
+        projectId: source.projectId,
+        title: title,
+        cwd: cwd,
+        createdAt: now,
+        updatedAt: now,
+        sessionFile: sessionFile,
+        worktree: worktree,
+        tags: source.tags,
+        disabledCapabilityIds: source.disabledCapabilityIds,
+        autoRetryEnabled: source.autoRetryEnabled
+      )
+    }
+
+    do {
+      if source.worktree != nil && project.isGit {
+        worktree = try await GitService.createWorktree(projectPath: project.path, threadId: id, seed: source)
+        cwd = worktree!.path
+        try await GitService.copyWorktreeState(source: source, target: threadRecord(nil))
+      }
+      if let sourceFile = source.sessionFile {
+        let history = try Sessions.readSessionTree(sessionFile: sourceFile)
+        if let leafId = history.leafId.stringValue {
+          sessionFile = try Sessions.cloneSessionBranch(
+            sourceFile: sourceFile,
+            entryId: leafId,
+            targetCwd: cwd,
+            env: store.snapshot().settings.env,
+            rewindSelectedUser: false
+          )
+        }
+      }
+    } catch {
+      if worktree != nil {
+        try? await GitService.removeWorktree(projectPath: project.path, thread: threadRecord(nil))
+      }
+      throw error
+    }
+
+    let thread = threadRecord(sessionFile)
     store.update { state in
       state.threads.insert(thread, at: 0)
       state.selectedThreadId = thread.id
@@ -432,13 +580,23 @@ final class Backend {
   private func purgeThread(threadId: String) async throws -> JSONValue? {
     let thread = try store.thread(threadId)
     guard thread.deletedAt != nil else { throw BridgeError("Move the thread to Trash before deleting it permanently") }
-    if thread.worktree != nil {
-      throw BridgeError("Purging isolated worktree threads is not supported in the Swift shell yet")
-    }
+    let project = try store.project(thread.projectId)
     let alert = NSAlert()
     alert.alertStyle = .warning
     alert.messageText = "Delete “\(thread.title)” permanently?"
     alert.informativeText = "Its CodePi metadata and session listing will be removed. This cannot be undone."
+    if thread.worktree != nil {
+      let risk = await GitService.worktreeRemovalRisk(thread: thread)
+      if risk.dirty || risk.unpushedCommits > 0 {
+        var details: [String] = []
+        if risk.dirty { details.append("uncommitted changes") }
+        if risk.unpushedCommits > 0 {
+          details.append("\(risk.unpushedCommits) unpushed commit\(risk.unpushedCommits == 1 ? "" : "s")")
+        }
+        alert.messageText = "This isolated worktree has \(details.joined(separator: " and "))."
+        alert.informativeText = "Permanent deletion removes its local worktree and branch. This cannot be undone."
+      }
+    }
     alert.addButton(withTitle: "Cancel")
     alert.addButton(withTitle: "Delete Permanently")
     let response: NSApplication.ModalResponse
@@ -449,6 +607,10 @@ final class Backend {
     }
     guard response == .alertSecondButtonReturn else { throw BridgeError("Permanent deletion was cancelled") }
     await processes.close(threadId)
+    await terminals.closeThread(threadId)
+    if thread.worktree != nil {
+      try await GitService.removeWorktree(projectPath: project.path, thread: thread)
+    }
     store.update { state in
       state.threads.removeAll { $0.id == threadId }
       if let sessionFile = thread.sessionFile {
@@ -542,6 +704,23 @@ func requireString(_ args: [JSONValue], _ index: Int, _ name: String) throws -> 
 func requireBool(_ args: [JSONValue], _ index: Int, _ name: String) throws -> Bool {
   guard args.count > index, let value = args[index].boolValue else {
     throw BridgeError("\(name) is invalid")
+  }
+  return value
+}
+
+func requireInteger(_ args: [JSONValue], _ index: Int, _ name: String) throws -> Int {
+  guard args.count > index, let value = args[index].numberValue, value == value.rounded() else {
+    throw BridgeError("\(name) is invalid")
+  }
+  return Int(value)
+}
+
+/// A repository-relative path: never absolute, never traversing upward.
+func requireRepoPath(_ args: [JSONValue], _ index: Int) throws -> String {
+  let value = try requireString(args, index, "path")
+  let components = value.components(separatedBy: "/")
+  guard !value.hasPrefix("/"), !value.hasPrefix("~"), !components.contains(".."), value.count <= 4_096 else {
+    throw BridgeError("path is invalid")
   }
   return value
 }
