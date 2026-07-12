@@ -28,6 +28,7 @@ import type {
   UsageDashboard
 } from '../shared/contracts'
 import { ipcChannels as channels } from '../shared/ipc-channels'
+import { DEFAULT_THREAD_TITLE } from '../shared/thread-title'
 import { AttachmentService } from './attachment-service'
 import { exportThreadToPath } from './export-service'
 import {
@@ -462,7 +463,7 @@ async function createThread(inputValue: unknown): Promise<ThreadRecord> {
         await copyWorktreeState(source, {
           id,
           projectId: project.id,
-          title: input.title || 'New thread',
+          title: input.title || DEFAULT_THREAD_TITLE,
           cwd,
           status: 'idle',
           createdAt: now,
@@ -491,7 +492,7 @@ async function createThread(inputValue: unknown): Promise<ThreadRecord> {
       const temporary: ThreadRecord = {
         id,
         projectId: project.id,
-        title: input.title || 'New thread',
+        title: input.title || DEFAULT_THREAD_TITLE,
         cwd,
         status: 'idle',
         createdAt: now,
@@ -510,7 +511,7 @@ async function createThread(inputValue: unknown): Promise<ThreadRecord> {
   const thread: ThreadRecord = {
     id,
     projectId: project.id,
-    title: input.title?.trim() || (sourceTitle ? `Branch of ${sourceTitle}` : 'New thread'),
+    title: input.title?.trim() || (sourceTitle ? `Branch of ${sourceTitle}` : DEFAULT_THREAD_TITLE),
     cwd,
     status: 'idle',
     createdAt: now,

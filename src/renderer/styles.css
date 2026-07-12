@@ -118,6 +118,48 @@ select:focus-visible {
   user-select: none;
 }
 
+.pane-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 40;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+}
+
+.pane-resize-handle.is-end {
+  right: 0;
+}
+
+.pane-resize-handle.is-start {
+  left: 0;
+}
+
+.pane-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background 0.12s ease 0.08s;
+}
+
+.pane-resize-handle.is-end::after {
+  right: 0;
+}
+
+.pane-resize-handle.is-start::after {
+  left: 0;
+}
+
+.pane-resize-handle:hover::after,
+.pane-resize-handle.is-dragging::after {
+  background: color-mix(in srgb, var(--accent) 62%, transparent);
+}
+
 .no-drag,
 .drag-region button,
 .drag-region input,
@@ -139,15 +181,14 @@ select:focus-visible {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width, 260px) minmax(0, 1fr);
   width: 100%;
   height: 100%;
   background: transparent;
 }
 
 .sidebar {
-  width: 260px;
-  min-width: 260px;
+  min-width: 0;
   display: grid;
   grid-template-rows: 52px 31px minmax(0, 1fr) 49px;
   overflow: hidden;
@@ -2414,7 +2455,7 @@ select:focus-visible {
 }
 
 .main-pane.has-workspace-dock {
-  grid-template-columns: minmax(0, 58fr) minmax(330px, 42fr);
+  grid-template-columns: minmax(0, 58fr) var(--dock-width, minmax(330px, 42fr));
 }
 
 .main-content {
@@ -3792,7 +3833,7 @@ select:focus-visible {
   grid-template-rows: 41px minmax(0, 1fr);
   overflow: hidden;
   border-left: 1px solid var(--border-strong);
-  background: var(--surface);
+  background: var(--canvas);
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.025);
 }
 
@@ -3804,7 +3845,7 @@ select:focus-visible {
   gap: 5px;
   padding: 6px 7px 5px 8px;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface-muted) 72%, var(--surface));
+  background: var(--canvas);
 }
 
 .workspace-dock-tabs {
@@ -3946,18 +3987,19 @@ select:focus-visible {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(142px, 36%) minmax(0, 64%);
+  grid-template-columns: var(--file-list-width, minmax(142px, 36%)) minmax(0, 1fr);
   overflow: hidden;
 }
 
 .workspace-file-sidebar {
+  position: relative;
   min-width: 0;
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   border-right: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface-muted) 55%, var(--surface));
+  background: color-mix(in srgb, var(--surface-muted) 30%, var(--canvas));
 }
 
 .workspace-file-toolbar {
@@ -4094,7 +4136,7 @@ select:focus-visible {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
-  background: var(--surface);
+  background: var(--canvas);
 }
 
 .workspace-preview-header {
@@ -4106,7 +4148,7 @@ select:focus-visible {
   gap: 8px;
   padding: 6px 9px;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface-muted) 45%, var(--surface));
+  background: var(--canvas);
 }
 
 .workspace-preview-header > div {
@@ -4141,7 +4183,7 @@ select:focus-visible {
   overflow: auto;
   border: 0;
   color: var(--text-secondary);
-  background: var(--surface);
+  background: var(--canvas);
   font-family: "SF Mono", ui-monospace, Menlo, Monaco, monospace;
   font-size: 10px;
   line-height: 1.52;
@@ -4519,7 +4561,7 @@ select:focus-visible {
 
 @media (max-width: 1120px) {
   .main-pane.has-workspace-dock {
-    grid-template-columns: minmax(0, 54fr) minmax(320px, 46fr);
+    grid-template-columns: minmax(0, 54fr) var(--dock-width, minmax(320px, 46fr));
   }
 
   .main-pane.has-workspace-dock .thread-cwd,
@@ -4559,6 +4601,11 @@ select:focus-visible {
     width: min(540px, calc(100% - 42px));
     height: 100%;
     box-shadow: -16px 0 45px rgba(0, 0, 0, 0.18);
+  }
+
+  /* The dock is a fixed-width overlay at this size; its edge is not resizable. */
+  .main-pane.has-workspace-dock .workspace-dock > .pane-resize-handle {
+    display: none;
   }
 
   .main-pane.has-workspace-dock .thread-cwd {

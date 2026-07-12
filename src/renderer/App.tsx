@@ -16,6 +16,7 @@ import type {
   ThreadRecord,
   ThreadSearchResult,
 } from '../shared/contracts'
+import { autoThreadTitle, DEFAULT_THREAD_TITLE } from '../shared/thread-title'
 import { ChangesView } from './components/ChangesView'
 import { CommandPalette, type CommandPaletteAction } from './components/CommandPalette'
 import { Composer } from './components/Composer'
@@ -26,6 +27,7 @@ import { TerminalPane } from './components/TerminalPane'
 import { ThreadHeader, type ThreadTab } from './components/ThreadHeader'
 import { Transcript } from './components/Transcript'
 import { WorkspaceDock, type WorkspaceDockTab } from './components/WorkspaceDock'
+import { usePersistedWidth } from './hooks/usePersistedWidth'
 import { useTheme } from './hooks/useTheme'
 import { appendMessage, markOptimisticUserMessage } from './runtime-messages'
 import type { LiveSegment, LiveToolSegment, LiveTurn } from './ui-types'
@@ -309,6 +311,8 @@ export function App(): React.JSX.Element {
     : undefined
   const terminalThreadIds = useMemo(() => Object.keys(terminalByThread), [terminalByThread])
   const terminalOpen = selectedThreadId ? terminalByThread[selectedThreadId] ?? false : false
+  const [sidebarWidth, setSidebarWidth] = usePersistedWidth('codepi.sidebar-width')
+  const [dockWidth, setDockWidth] = usePersistedWidth('codepi.workspace-dock-width')
 
   const toggleTerminal = useCallback((threadId: string) => {
     setTerminalByThread((current) => ({ ...current, [threadId]: !(current[threadId] ?? false) }))
@@ -618,6 +622,10 @@ export function App(): React.JSX.Element {
                   }
                   throw reason
                 }
+                if (selectedThread.title === DEFAULT_THREAD_TITLE) {
+                  const title = autoThreadTitle(text)
+                  if (title) void updateManagedThread(selectedThread, { title }).catch(() => undefined)
+                }
               }}
             />}
           </div>
@@ -656,7 +664,10 @@ export function App(): React.JSX.Element {
   if (fatalError) return <div className="fatal-screen"><AlertTriangle size={22} /><h1>CodePi couldn’t start</h1><p>{fatalError}</p></div>
 
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      style={sidebarWidth ? { '--sidebar-width': `min(${sidebarWidth}px, 42%)` } as React.CSSProperties : undefined}
+    >
       <Sidebar
         projects={projects}
         threads={threads}
@@ -695,8 +706,12 @@ export function App(): React.JSX.Element {
         }}
         onOpenCommandPalette={() => setCommandPaletteOpen(true)}
         onOpenSettings={() => void window.codePi.openSettings()}
+        onResize={setSidebarWidth}
       />
-      <main className={`main-pane ${selectedDock?.open ? 'has-workspace-dock' : ''}`}>
+      <main
+        className={`main-pane ${selectedDock?.open ? 'has-workspace-dock' : ''}`}
+        style={dockWidth ? { '--dock-width': `min(${dockWidth}px, 76%)` } as React.CSSProperties : undefined}
+      >
         <div className="main-content">
           {shell}
           {terminalThreadIds.length > 0 && (
@@ -718,6 +733,7 @@ export function App(): React.JSX.Element {
             key={selectedThread.id}
             threadId={selectedThread.id}
             activeTab={selectedDock.tab}
+            onResize={setDockWidth}
             onTabChange={(tab) => setDockByThread((current) => ({
               ...current,
               [selectedThread.id]: { ...(current[selectedThread.id] ?? {}), open: true, tab }

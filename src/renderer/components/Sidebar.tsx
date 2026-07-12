@@ -15,6 +15,7 @@ import {
 import { useDeferredValue, useMemo, useState } from 'react'
 import type { ProjectRecord, ThreadRecord } from '../../shared/contracts'
 import { useRelativeTime } from '../hooks/useRelativeTime'
+import { PaneResizeHandle } from './PaneResizeHandle'
 import { ThreadActionsMenu, type ThreadActionCallbacks } from './ThreadActionsMenu'
 
 export type SidebarFilter = 'all' | 'running' | 'unread'
@@ -32,6 +33,7 @@ export interface SidebarProps extends ThreadActionCallbacks {
   onOpenSettings: () => void
   onOpenCommandPalette?: () => void
   onSearchQueryChange?: (query: string) => void
+  onResize: (width: number | undefined) => void
 }
 
 interface ThreadItemProps extends ThreadActionCallbacks {
@@ -179,6 +181,7 @@ export function Sidebar({
   onTrashThread,
   onRestoreThread,
   onPurgeThread,
+  onResize,
 }: SidebarProps): React.JSX.Element {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<SidebarFilter>('all')
@@ -392,6 +395,14 @@ export function Sidebar({
           <span className="shortcut">⌘,</span>
         </button>
       </div>
+      <PaneResizeHandle
+        label="Resize sidebar"
+        edge="end"
+        minWidth={220}
+        maxWidth={(container) => Math.min(460, container * 0.5)}
+        onResize={onResize}
+        onReset={() => onResize(undefined)}
+      />
     </aside>
   )
 }

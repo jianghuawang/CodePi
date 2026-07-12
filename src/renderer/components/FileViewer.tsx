@@ -1,6 +1,8 @@
 import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen, RefreshCw, Search } from 'lucide-react'
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import type { WorkspaceFile, WorkspaceFilePreview } from '../../shared/contracts'
+import { usePersistedWidth } from '../hooks/usePersistedWidth'
+import { PaneResizeHandle } from './PaneResizeHandle'
 
 export interface FileViewerProps {
   threadId: string
@@ -130,6 +132,7 @@ export function FileViewer({ threadId, initialPath, onSelectPath }: FileViewerPr
   const [loadingFiles, setLoadingFiles] = useState(true)
   const [loadingPreview, setLoadingPreview] = useState(false)
   const [error, setError] = useState<string>()
+  const [listWidth, setListWidth] = usePersistedWidth('codepi.file-list-width')
   const requestId = useRef(0)
   const previewRequestId = useRef(0)
   const deferredQuery = useDeferredValue(query.trim().toLocaleLowerCase())
@@ -213,7 +216,11 @@ export function FileViewer({ threadId, initialPath, onSelectPath }: FileViewerPr
   const visibleFiles = filteredFiles.slice(0, 600)
 
   return (
-    <section className="workspace-file-viewer" aria-label="Workspace files">
+    <section
+      className="workspace-file-viewer"
+      aria-label="Workspace files"
+      style={listWidth ? { '--file-list-width': `min(${listWidth}px, 68%)` } as React.CSSProperties : undefined}
+    >
       <aside className="workspace-file-sidebar">
         <div className="workspace-file-toolbar">
           <label className="workspace-file-search">
@@ -274,6 +281,14 @@ export function FileViewer({ threadId, initialPath, onSelectPath }: FileViewerPr
             <div className="workspace-pane-status">Showing the first {visibleFiles.length.toLocaleString()} matches.</div>
           )}
         </div>
+        <PaneResizeHandle
+          label="Resize file list"
+          edge="end"
+          minWidth={142}
+          maxWidth={(container) => container * 0.68}
+          onResize={setListWidth}
+          onReset={() => setListWidth(undefined)}
+        />
       </aside>
       <div className="workspace-file-preview">
         {error && <div className="workspace-pane-error" role="alert">{error}</div>}

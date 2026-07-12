@@ -2,6 +2,7 @@ import { FileText, Monitor, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { AppPreview } from './AppPreview'
 import { FileViewer } from './FileViewer'
+import { PaneResizeHandle } from './PaneResizeHandle'
 
 export type WorkspaceDockTab = 'files' | 'preview'
 
@@ -10,6 +11,7 @@ export interface WorkspaceDockProps {
   activeTab: WorkspaceDockTab
   onTabChange: (tab: WorkspaceDockTab) => void
   onClose: () => void
+  onResize: (width: number | undefined) => void
   initialFilePath?: string
   initialPreviewUrl?: string
 }
@@ -28,6 +30,7 @@ export function WorkspaceDock({
   activeTab,
   onTabChange,
   onClose,
+  onResize,
   initialFilePath,
   initialPreviewUrl,
 }: WorkspaceDockProps): React.JSX.Element {
@@ -44,6 +47,14 @@ export function WorkspaceDock({
 
   return (
     <section className="workspace-dock" data-active-tab={activeTab} aria-label="Thread workspace">
+      <PaneResizeHandle
+        label="Resize workspace panel"
+        edge="start"
+        minWidth={330}
+        maxWidth={(container) => container * 0.72}
+        onResize={onResize}
+        onReset={() => onResize(undefined)}
+      />
       <header className="workspace-dock-header">
         <nav className="workspace-dock-tabs" role="tablist" aria-label="Workspace tools">
           {TABS.map((tab) => {
