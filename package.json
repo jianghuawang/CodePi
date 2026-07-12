@@ -1,6 +1,6 @@
 {
   "name": "codepi",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "A macOS-first desktop command center for the Pi coding agent",
   "license": "MIT",

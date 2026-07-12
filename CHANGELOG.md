@@ -6,6 +6,31 @@ follow semantic versioning.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-12
+
+### Added
+
+- Automatic thread titles: a thread still named "New thread" takes its title
+  from the first prompt sent, and the name syncs into Pi's session.
+- Drag-to-resize layout: the app sidebar, the workspace panel, and the file
+  list inside Files can all be resized; widths persist and a double-click on
+  a divider restores the default.
+- Experimental native Swift shell (SwiftPM package under `macos/`, ~4 MB app)
+  implementing the full renderer bridge contract: state and thread library,
+  Pi RPC streaming, git and isolated worktrees, a native PTY terminal,
+  workspace files, transcript search, Markdown/HTML export, the localhost
+  preview, and per-thread extensions/skills. See
+  `docs/SWIFT_SHELL_DESIGN.md` and `docs/SWIFT_SHELL_PLAN.md`; the Electron
+  app remains the supported build until the cutover checklist completes.
+
+### Changed
+
+- The installed Electron app shrank from ~330 MB to ~280 MB: bundled
+  JavaScript dependencies are no longer packaged a second time inside
+  `app.asar`.
+- The workspace file preview and dock chrome now match the application
+  background in both light and dark themes.
+
 ## [0.2.0] - 2026-07-11
 
 ### Added
