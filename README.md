@@ -1,36 +1,48 @@
-# CodePi
+# CodePi — Pi GUI for macOS
 
 [![CI](https://github.com/jianghuawang/CodePi/actions/workflows/ci.yml/badge.svg)](https://github.com/jianghuawang/CodePi/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/jianghuawang/CodePi?include_prereleases&label=release)](https://github.com/jianghuawang/CodePi/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey.svg)](#install)
 
-CodePi is a macOS-first desktop command center for the [Pi coding agent](https://github.com/earendil-works/pi). It runs one Pi RPC subprocess per open thread, keeps multiple agents active in parallel, renders their streamed work as a native-feeling conversation, and adds Git review, project context, usage visibility, and everyday thread organization.
+**CodePi is an open-source desktop GUI for the [Pi coding agent](https://github.com/earendil-works/pi), built with Electron, React, and TypeScript.**
 
-![CodePi desktop app](docs/codepi_screenshot.png)
+CodePi connects to Pi through RPC mode and gives every open thread its own Pi subprocess. Keep multiple coding agents working in parallel while you follow streamed responses, add project context, review Git changes, inspect files, use a real terminal, preview local apps, and monitor context and cost.
 
-> CodePi is currently macOS-only. Platform checks and process-launch details are isolated so Windows and Linux support can be added later without changing the renderer contract.
+Pi remains the agent runtime and source of truth for sessions; CodePi adds the desktop experience around it.
 
-## What is included
+[Download the preview](https://github.com/jianghuawang/CodePi/releases) · [Build from source](#build-from-source) · [Getting started](#getting-started) · [Architecture](#architecture-and-rpc-lifecycle)
 
-- Per-thread Pi extension and skill controls, including resources discovered from user, project, package, and Pi settings locations.
-- A context-rich composer with file and image attachments, drag and drop, pasted screenshots, `@file` suggestions, Pi slash-command suggestions, recent files, built-in prompts, and saved prompt templates.
-- A context and cost dashboard with current-session statistics, project usage totals, a 14-day chart, manual compaction, auto-compaction, and auto-retry controls.
-- A right-side workspace dock with a read-only file viewer, a real PTY terminal, and a loopback-only app preview.
-- Daily thread management: rename, pin, archive, mark read or unread, tag, duplicate, search, export, move to Trash, restore, and permanently delete.
-- The existing Codex-style Git changes view, isolated worktrees, session-tree history, and branch-from-history workflow.
+![CodePi Pi coding agent GUI on macOS with parallel threads and project tools](docs/codepi_screenshot.png)
 
-## Install status
+> **Platform:** CodePi currently supports macOS 12 or newer on Apple silicon. Platform checks and process-launch details are isolated so Linux and Windows support can be added without changing the renderer contract.
 
-The latest [GitHub release](https://github.com/jianghuawang/CodePi/releases)
-is a development preview. Its DMG is not yet notarized by Apple, so Gatekeeper
-will normally block the first launch. If you trust the downloaded artifact,
-try to open CodePi once and then allow it from **System Settings → Privacy &
-Security → Open Anyway**. Do not disable Gatekeeper globally.
+## Highlights
+
+- **Run Pi in parallel:** keep independent coding-agent threads active at the same time, each with its own conversation, model, context, and process lifecycle.
+- **Stay Git-native:** work on the current branch or opt into an isolated Git worktree, then review diffs, stage files, commit, push, or apply work back to the main checkout.
+- **Bring the right context:** attach files and images, paste screenshots, mention project files with `@`, run Pi slash commands, and reuse prompt templates.
+- **Keep tools beside the conversation:** inspect source files, use a real PTY terminal, and preview loopback development servers without leaving the app.
+- **Manage long-running work:** search, pin, tag, duplicate, archive, branch, export, restore, and monitor usage across Pi sessions.
+- **Use Pi directly:** CodePi talks to Pi through its documented RPC mode and keeps Pi-owned JSONL sessions as the source of truth.
+
+## Install
+
+### Download the preview
+
+**[Download the latest CodePi development preview →](https://github.com/jianghuawang/CodePi/releases)**
+
+The current build targets macOS 12 or newer on Apple silicon. Its DMG is not yet
+notarized by Apple, so Gatekeeper will normally block the first launch. If you
+trust the downloaded artifact, try to open CodePi once and then allow it from
+**System Settings → Privacy & Security → Open Anyway**. Do not disable
+Gatekeeper globally.
 
 For the lowest-friction development setup, build CodePi from source using the
 steps below. A Developer ID-signed and notarized general release is planned;
 maintainers should follow the [release checklist](docs/RELEASING.md).
 
-## Prerequisites
+### Requirements
 
 - macOS 12 or newer on Apple silicon
 - Node.js 22.19 or newer
@@ -47,7 +59,7 @@ pi --version
 
 CodePi validates the configured binary on launch. If it cannot run `<binary> --version`, the app opens an onboarding screen instead of failing. A custom binary path and provider environment variables can be set in Settings.
 
-## Run locally
+### Build from source
 
 ```bash
 npm install
